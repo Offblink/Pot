@@ -9,6 +9,7 @@ that session reattaches through /events exactly like a live chat turn.
 
 import contextlib
 import json
+import os
 import secrets
 import socket
 import sys
@@ -1134,10 +1135,13 @@ def run_server(
     hub = Hub("pot", WEBUI_TOKEN, PROJECT_ROOT / "data", port=hub_port if hub_port else 0)
     hub.webui_url = url
     hub.start()
-    print(f"  Pot WebUI: {url}")
-    print(f"  Pot Hub: http://127.0.0.1:{hub.port}")
-    print("  Press Ctrl+C to stop")
-    webbrowser.open(url)
+    print(f"  Pot WebUI: {url}", flush=True)
+    print(f"  Pot Hub: http://127.0.0.1:{hub.port}", flush=True)
+    print("  Press Ctrl+C to stop", flush=True)
+    # The launcher owns "open chat" (its own button/tray); it sets
+    # POT_NO_BROWSER=1 so spawning the host does not hijack the desktop.
+    if not os.environ.get("POT_NO_BROWSER"):
+        webbrowser.open(url)
     mcp_tools = rt.mcp_tools()
     if mcp_tools:
         print(f"  MCP: {len(mcp_tools)} tools loaded -> {', '.join(sorted(mcp_tools))}")

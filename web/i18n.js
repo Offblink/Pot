@@ -38,7 +38,7 @@
       'shuttle.title': '文件传输助手',
 
       /* ---- config modal ---- */
-      'cfg.title': '配置 Fungi',
+      'cfg.title': '配置 Pot',
       'cfg.intro': '填好接口地址和密钥就能开始。',
       'cfg.endpoint': '接口地址',
       'cfg.apiKey': 'API Key',
@@ -253,7 +253,7 @@
       'session.emptyTitle': 'Empty',
       'shuttle.title': 'File transfer assistant',
 
-      'cfg.title': 'Configure Fungi',
+      'cfg.title': 'Configure Pot',
       'cfg.intro': 'Set your API endpoint and key to get started.',
       'cfg.endpoint': 'Endpoint',
       'cfg.apiKey': 'API Key',

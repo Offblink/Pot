@@ -1,3 +1,11 @@
+// The material3 coordinate changed versioning away from CMP itself (1.9.0 is
+// the latest stable while CMP is at 1.12.2) — the plugin's accessor still
+// carries the CORRECT aligned coordinate, just at ERROR-level deprecation.
+// Suppressing keeps us on the aligned version instead of guessing one.
+@file:Suppress("DEPRECATION")
+
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+
 plugins {
     kotlin("jvm") version "2.3.21"
     // Kotlin 2.x needs the compose compiler plugin at the same Kotlin version
@@ -19,7 +27,10 @@ dependencies {
     // Pitfall #2: without compose.desktop.currentOs + material3 the whole
     // file fills with "Unresolved reference 'androidx'".
     implementation(compose.desktop.currentOs)
+    @Suppress("DEPRECATION") // aligned coordinate; literal versions drift
     implementation(compose.material3)
+    // Minimal JSON for the loopback API payloads (mirror of the hub routes).
+    implementation("org.json:json:20240303")
 }
 
 kotlin {
@@ -28,7 +39,7 @@ kotlin {
 
 compose.desktop {
     application {
-        mainClass = "MainKt"
+        mainClass = "pot.launcher.MainKt"
 
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
