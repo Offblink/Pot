@@ -20,6 +20,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -125,6 +126,14 @@ fun SettingsPage(
                             state.toast(Strings.t("已保存（下次启动宿主时生效）", "Saved (applies next host start)"))
                         },
                     ) { Text(Strings.t("保存路径", "Save paths")) }
+                }
+                Spacer(Modifier.height(10.dp))
+                // 日志：启动器与宿主各一份，出问题时先看这里（宿主写 logs/pot-*.log）。
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Muted(Strings.t("日志：", "log: ") + Log.path())
+                    TextButton(onClick = { Log.openFolder() }) {
+                        Text(Strings.t("打开日志", "Open log folder"), fontSize = 12.sp)
+                    }
                 }
             }
         }

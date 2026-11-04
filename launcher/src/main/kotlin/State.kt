@@ -85,8 +85,10 @@ class PotState(
             try {
                 block()
             } catch (e: ApiError) {
+                Log.warn("api: ${e.code}: ${e.message}")
                 toast("${e.code}: ${e.message}")
             } catch (e: Exception) {
+                Log.error("api: ${e.message ?: e::class.simpleName}", e)
                 toast(e.message ?: Strings.t("出错了", "Something went wrong"))
             }
             refreshBoard()

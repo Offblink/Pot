@@ -137,6 +137,7 @@ class HostManager(
         if (status == HostStatus.STARTING || status == HostStatus.RUNNING) return
         stopping = false
         status = HostStatus.STARTING
+        Log.info("host: start requested (python=${settings.python}, repo=${settings.repo})")
         lastError = ""
         webuiUrl = ""
         hubUrl = ""
@@ -148,9 +149,11 @@ class HostManager(
                         -1
                     }
                 if (stopping) {
+                    Log.info("host: exited (code=$code) after a stop request")
                     status = HostStatus.STOPPED
                     return@launch
                 }
+                Log.warn("host: exited (code=$code)${if (lastError.isEmpty()) "" else " — $lastError"}")
                 status = HostStatus.CRASHED
                 poll?.cancel()
                 if (lastError.isEmpty()) {
@@ -220,8 +223,10 @@ class HostManager(
         // "Open chat" is the launcher's own action — the host must not grab
         // the desktop by opening a browser on every spawn.
         pb.environment()["POT_NO_BROWSER"] = "1"
+        Log.info("host: spawning ${settings.python} -m pot --web")
         val p = pb.start()
         process = p
+        Log.info("host: pid=${p.pid()}")
         val drainer =
             Thread {
                 p.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
@@ -233,6 +238,7 @@ class HostManager(
                             hubUrl = m.groupValues[1]
                         }
                         if (webuiUrl.isNotEmpty() && hubUrl.isNotEmpty() && status != HostStatus.RUNNING) {
+                            Log.info("host: up (webui=$webuiUrl hub=$hubUrl)")
                             status = HostStatus.RUNNING
                             lastError = ""
                             beginPolling()
@@ -261,6 +267,7 @@ class HostManager(
                     } catch (e: Exception) {
                         fails += 1
                         if (fails >= 3 && status == HostStatus.RUNNING) {
+                            Log.warn("host: lost the status poll — ${e.message ?: "unknown"}")
                             lastError =
                                 Strings.t("失去与宿主连接：", "Lost the connection to the host: ") +
                                     (e.message ?: "unknown")
@@ -274,6 +281,7 @@ class HostManager(
     }
 
     private fun killTree(pid: Long) {
+        Log.info("host: kill tree $pid")
         runCatching {
             ProcessBuilder("taskkill", "/T", "/F", "/PID", pid.toString())
                 .redirectErrorStream(true)

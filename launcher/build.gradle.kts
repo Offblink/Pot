@@ -76,14 +76,23 @@ compose.desktop {
         mainClass = "pot.launcher.MainKt"
 
         nativeDistributions {
+            // jpackage's runtime is a jdeps-derived subset: the launcher talks to the
+            // host over java.net.http, which jdeps cannot see, so the packaged exe died
+            // on its first poll with NoClassDefFoundError (found in the launcher log).
+            modules("java.net.http")
             targetFormats(TargetFormat.Msi)
             packageName = "Pot"
             packageVersion = potVersion
-            description = "Pot launcher — board, settings, host lifecycle"
+            // ASCII only: jpackage on this box decodes its own args file as GBK and dies
+            // with "Input length = 1" the moment an em dash shows up.
+            description = "Pot launcher - board, settings, host lifecycle"
             vendor = "Pot"
 
             windows {
                 menuGroup = "Pot"
+                // 🪴 as the exe/installer icon (a multi-size .ico built from the same
+                // PNGs the tray and the About page use — one mark everywhere).
+                iconFile.set(file("icons/pot.ico"))
                 // per-machine install so the tray app finds its own shortcuts
                 upgradeUuid = "8f6e0a4e-0f13-4a21-9d5c-6a1b7d4a9c31"
             }

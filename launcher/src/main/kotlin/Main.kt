@@ -57,6 +57,10 @@ fun appIcon(size: Int = 256): java.awt.Image? =
     }.getOrNull()
 
 fun main() = application {
+    // First thing: everything below can fail, and the log (plus the default
+    // uncaught-exception handler it installs) is what a bug report gets read from.
+    Log.install()
+    Log.info("settings=${LauncherSettings.settingsFile().absolutePath}")
     // Swing's only surface is the tray popup (see TrayController): the system look
     // makes it sit next to the shell's own menus instead of the dated Metal theme.
     runCatching { javax.swing.UIManager.setLookAndFeel(javax.swing.UIManager.getSystemLookAndFeelClassName()) }
@@ -70,6 +74,7 @@ fun main() = application {
     // The Compose window, captured from the content scope: closing requests hide it,
     // and the tray has to be able to bring it back (裁决 24).
     var winRef by remember { mutableStateOf<java.awt.Window?>(null) }
+    Log.info("launcher up: python=${settings.python} repo=${settings.repo} lang=${settings.lang.code} autoStart=${settings.autoStart} dark=${settings.dark}")
 
     LaunchedEffect(Unit) {
         if (settings.autoStart) host.start()
@@ -105,16 +110,18 @@ fun main() = application {
         tray.update(
             running = host.status == HostStatus.RUNNING,
             onShow = {
+                Log.info("tray: show window requested")
                 winRef?.let {
                     it.isVisible = true
                     it.toFront()
                     it.requestFocus()
-                }
+                } ?: Log.warn("tray: no window handle yet")
             },
             onOpenChat = { host.openChat() },
             onStart = { host.start() },
             onStop = { host.stop() },
             onExit = {
+                Log.info("tray: quit requested")
                 host.stopBlocking()
                 tray.dispose()
                 exitApplication()
@@ -125,7 +132,10 @@ fun main() = application {
     Window(
         // Close-to-tray (裁决 24): hiding keeps the host and the board alive; the
         // only way out is 退出 in the tray menu.
-        onCloseRequest = { winRef?.isVisible = false },
+        onCloseRequest = {
+            Log.info("window: close requested -> hide to tray (host keeps running)")
+            winRef?.isVisible = false
+        },
         title = "Pot",
         state = rememberWindowState(width = 940.dp, height = 600.dp),
     ) {
