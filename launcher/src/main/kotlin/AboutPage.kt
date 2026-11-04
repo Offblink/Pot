@@ -23,8 +23,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-const val LAUNCHER_VERSION = "0.1.0"
-
 /** 关于页：只放关于内容 —— 名字、版本、一句话定位、技术栈。 */
 @Composable
 fun AboutPage(host: HostManager) {
@@ -46,7 +44,7 @@ fun AboutPage(host: HostManager) {
         }
         Text("Pot", fontSize = 44.sp, fontWeight = FontWeight.Bold, color = p.primary)
         Text(
-            Strings.t("启动器", "Launcher") + " $LAUNCHER_VERSION",
+            Strings.t("启动器", "Launcher") + " $POT_VERSION",
             fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             color = p.muted,

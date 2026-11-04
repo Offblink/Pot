@@ -37,6 +37,40 @@ kotlin {
     jvmToolchain(17)
 }
 
+// Pot's version lives in ../pyproject.toml (the Python package declares it). The
+// launcher must not grow a second copy: read it here, generate a constant for the
+// About page, and hand the same string to the installer, so a release cannot ship
+// three versions.
+val potVersion: String =
+    Regex("""(?m)^version\s*=\s*"([^"]+)"""")
+        .find(file("../pyproject.toml").readText())
+        ?.groupValues?.get(1)
+        ?: error("no version in ../pyproject.toml")
+
+val generatedVersionDir = layout.buildDirectory.dir("generated/pot-version")
+val writeBuildInfo =
+    tasks.register("writeBuildInfo") {
+        val version = potVersion
+        val outDir = generatedVersionDir
+        inputs.property("version", version)
+        outputs.dir(outDir)
+        doLast {
+            val dir = outDir.get().asFile.resolve("pot/launcher")
+            dir.mkdirs()
+            dir.resolve("BuildInfo.kt").writeText(
+                """
+                |package pot.launcher
+                |
+                |/** Generated from ../pyproject.toml by the build — do not edit. */
+                |const val POT_VERSION: String = "$version"
+                |
+                """.trimMargin(),
+            )
+        }
+    }
+sourceSets["main"].java.srcDir(generatedVersionDir)
+tasks.named("compileKotlin") { dependsOn(writeBuildInfo) }
+
 compose.desktop {
     application {
         mainClass = "pot.launcher.MainKt"
@@ -44,7 +78,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi)
             packageName = "Pot"
-            packageVersion = "0.1.0"
+            packageVersion = potVersion
             description = "Pot launcher — board, settings, host lifecycle"
             vendor = "Pot"
 
