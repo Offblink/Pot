@@ -1,0 +1,2590 @@
+"""pot/tools/screen.py: the desktop-control contract (spec §35).
+
+Everything here runs without a desktop: the Win32 layer is monkeypatched, and
+what is asserted is the behaviour the design promised — coordinates come from
+the program, a window that is not on screen is never measured, permission is a
+time-boxed arm that always ends in a disarm, and nothing is injected when a key
+name is unknown.
+"""
+
+import json
+import time
+
+import pytest
+from PIL import Image, ImageDraw
+
+from pot import config as config_mod
+from pot.config import Config
+from pot.tools import screen
+from pot.tools.files import ImageRead
+
+
+def _frame(size=(40, 30), colour=(255, 255, 255), origin=(1000, 500)):
+    return screen.Frame(Image.new("RGB", size, colour), origin, 42, time.time())
+
+
+def _cand(n, name, cls, rect, patterns=(), source="a11y"):
+    return screen.Target(n, name, cls, rect, patterns, source)
+
+
+def _listed(hwnd, *cands, rect=None):
+    """The listing `targets` would have stored for this window, so the resolution half
+    can be driven without a desktop. `rect` is where the window was when it was cut
+    (only the picture tiers care)."""
+    screen._session.listings[hwnd] = screen.Listing({cand.n: cand for cand in cands}, rect)
+
+
+class _U32:
+    """Stand-in for the user32 handle: records what was asked of the OS."""
+
+    def __init__(self, window=True, client=(1000, 500, 1400, 800), cls="Notepad", caption=30):
+        self.window = window
+        self.client = client
+        self.cls = cls
+        self.caption = caption
+        self.shown = []
+
+    def IsWindow(self, _hwnd):  # noqa: N802 (mimics user32)
+        return self.window
+
+    def GetSystemMetrics(self, _code):  # noqa: N802 (mimics user32)
+        return self.caption
+
+    def FindWindowW(self, _cls, _name):  # noqa: N802 (mimics user32)
+        return 555  # the shell surfaces (taskbar / desktop) this box always has
+
+    def ShowWindow(self, hwnd, cmd):  # noqa: N802 (mimics user32)
+        self.shown.append((hwnd, cmd))
+        return True
+
+    def GetWindowRect(self, _hwnd, rect_ref):  # noqa: N802 (mimics user32)
+        left, top, right, bottom = self.client
+        rect_ref._obj.left, rect_ref._obj.top = left - 10, top - 30  # a title bar
+        rect_ref._obj.right, rect_ref._obj.bottom = right + 10, bottom + 10
+        return 1
+
+    def GetClientRect(self, _hwnd, rect_ref):  # noqa: N802 (mimics user32)
+        rect_ref._obj.right = self.client[2] - self.client[0]
+        rect_ref._obj.bottom = self.client[3] - self.client[1]
+        return 1
+
+    def ClientToScreen(self, _hwnd, point_ref):  # noqa: N802 (mimics user32)
+        point_ref._obj.x, point_ref._obj.y = self.client[0], self.client[1]
+        return 1
+
+    def GetClassNameW(self, _hwnd, buf, size):  # noqa: N802 (mimics user32)
+        name = self.cls
+        buf.value = name[: max(0, size - 1)]
+        return len(buf.value)
+
+
+@pytest.fixture(autouse=True)
+def _clean_session():
+    """Every test starts from a disarmed session, and leaves one behind."""
+    screen.release_all_keys()
+    screen._session.disarm()
+    yield
+    screen.release_all_keys()
+    screen._session.disarm()
+
+
+# ── the key table: resolve everything before injecting anything ─────────────
+def test_key_names_resolve_through_their_aliases():
+    assert (
+        screen.resolve_key("return") == screen.resolve_key("ENTER") == screen.resolve_key("enter")
+    )
+    assert screen.resolve_key("DEL") == screen.resolve_key("delete") == 0x2E
+    assert screen.resolve_key("cmd") == screen.resolve_key("win") == 0x5B
+    assert screen.resolve_key("PgUp") == screen.resolve_key("pageup") == 0x21
+    assert screen.resolve_key("nosuchkey") is None
+
+
+def test_send_keys_injects_nothing_when_one_name_is_unknown(monkeypatch):
+    """Resolve first, inject second: skipping 'ctrl' silently would press the
+    bare key, and skipping the key after it would leave Ctrl held down."""
+    events = []
+    monkeypatch.setattr(screen, "_key_event", lambda vk, *, down: events.append((vk, down)))
+    sent, error = screen.send_keys(["ctrl", "nosuchkey"])
+    assert sent == [] and "unknown key" in error and events == []
+
+
+def test_a_combination_presses_modifiers_around_the_key(monkeypatch):
+    events = []
+    monkeypatch.setattr(screen, "_key_event", lambda vk, *, down: events.append((vk, down)))
+    sent, error = screen.send_keys(["ctrl", "shift", "s"])
+    assert error is None and sent == ["ctrl", "shift", "s"]
+    assert events == [
+        (0x11, True),
+        (0x10, True),
+        (0x53, True),
+        (0x53, False),
+        (0x10, False),
+        (0x11, False),
+    ]
+
+
+def test_release_all_keys_clears_whatever_is_still_held(monkeypatch):
+    events = []
+    monkeypatch.setattr(screen, "_key_event", lambda vk, *, down: events.append((vk, down)))
+    monkeypatch.setattr(screen, "_held", {0x11, 0x10})
+    released = screen.release_all_keys()
+    assert events == [(0x10, False), (0x11, False)]
+    assert released == ["0x10", "0x11"] and screen._held == set()
+
+
+# ── the pointer travels to a click instead of teleporting ──────────────────
+def test_the_pointer_glides_to_the_target_and_lands_on_it(monkeypatch):
+    """A single absolute move is a teleport: the app sees one jump onto the target, so
+    hover states and anything that tracks the pointer see nothing at all. The path has
+    to be a real sequence, and its last point has to be the target exactly."""
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(screen, "_mouse_event", lambda x, y, flags: moves.append((x, y, flags)))
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (0, 0))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    target = (700, 400)  # physical pixels, inside this box's 2240x1400 virtual screen
+    injected = screen.move_to(*target)
+
+    assert injected == screen.MOVE_STEPS == len(moves)
+    assert len(set(moves)) > 2, "a teleport would be one point"
+    assert moves[-1][:2] == screen._norm_point(*target)  # lands exactly
+    assert all(flags == moves[0][2] for _x, _y, flags in moves)  # pure moves, no buttons
+    # ordered travel: each point closer to the target than the one before it
+    distances = [abs(x - moves[-1][0]) + abs(y - moves[-1][1]) for x, y, _f in moves]
+    assert distances == sorted(distances, reverse=True)
+    # smoothstep: the path starts slower than it ends (eased in), so the first steps are
+    # the shortest and the middle ones the longest
+    hops = [
+        abs(moves[i + 1][0] - moves[i][0]) + abs(moves[i + 1][1] - moves[i][1])
+        for i in range(len(moves) - 1)
+    ]
+    assert hops[0] < hops[len(hops) // 2]
+
+
+def test_a_click_glides_first_and_keeps_its_self_check_honest(monkeypatch):
+    """The injection self-check catches a struct-size mistake through SendInput's silent
+    0; it has to count the travel it now makes as well."""
+    moves: list[tuple[int, int, int]] = []
+    landed = {"at": (10, 10)}
+
+    def fake_move(x, y, flags):
+        moves.append((x, y, flags))
+        landed["at"] = (700, 400)  # the injected moves really do move the pointer
+        return 1
+
+    monkeypatch.setattr(screen, "_mouse_event", fake_move)
+    monkeypatch.setattr(screen, "cursor_pos", lambda: landed["at"])
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    assert screen.click_at(700, 400, clicks=2) is True
+    down = [n for n, (_x, _y, flags) in enumerate(moves) if flags & screen.MOUSEEVENTF_LEFTDOWN]
+    up = [n for n, (_x, _y, flags) in enumerate(moves) if flags & screen.MOUSEEVENTF_LEFTUP]
+    assert len(down) == 2 and len(up) == 2
+    assert min(down) == len(moves) - 4, "the travel happens before the first press"
+    assert moves[-1][:2] == screen._norm_point(700, 400)
+    # nothing moves the pointer between the two presses: that is what makes it one gesture
+    between = moves[down[0] : up[1]]
+    assert len({point[:2] for point in between}) == 1
+
+
+def test_a_pointer_already_at_the_target_does_not_travel(monkeypatch):
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        screen, "_mouse_event", lambda x, y, flags: moves.append((x, y, flags)) or 1
+    )
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (700, 400))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    assert screen.move_to(700, 400) == 1 and len(moves) == 1
+    moves.clear()
+    assert screen.click_at(700, 400) is True and len(moves) == 3  # pin + press + release
+
+
+def test_a_click_is_not_pressed_when_the_pointer_never_arrived(monkeypatch):
+    """Measured 2026-09-14: a coordinate outside the virtual screen is clamped by the OS
+    (x=-185 arrived at 0). Pressing there would be a wrong click on whatever sits at the
+    edge, so no arrival means no press — the caller gets a plain, unexplained False."""
+    moves: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        screen, "_mouse_event", lambda x, y, flags: moves.append((x, y, flags)) or 1
+    )
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (0, 345))  # clamped, as measured
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    assert screen.click_at(-185, 345) is False
+    assert not [f for _x, _y, f in moves if f & screen.MOUSEEVENTF_LEFTDOWN]
+    assert all(
+        f == screen.MOUSEEVENTF_MOVE | screen.MOUSEEVENTF_ABSOLUTE | screen.MOUSEEVENTF_VIRTUALDESK
+        for _x, _y, f in moves
+    )
+
+    monkeypatch.setattr(screen, "cursor_pos", lambda: (700, 400))  # a pixel off is fine
+    assert screen.click_at(701, 399) is True
+
+
+# ── 逐字输入: one character at a time, the way Typer does it (spec §37) ─────
+def _char_events(monkeypatch):
+    """Record every injected event as (wVk, wScan, dwFlags)."""
+    events: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(
+        screen,
+        "_send",
+        lambda payload: events.append((payload.ki.wVk, payload.ki.wScan, payload.ki.dwFlags)) or 1,
+    )
+    return events
+
+
+def test_typing_sends_one_unicode_pair_per_character_in_order(monkeypatch):
+    """The character itself, not a keycode: that is what lets CJK arrive without an IME."""
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    typed, error = screen.type_text("A你", delay=0.01)
+    assert (typed, error) == (2, None)
+    unicode_down, unicode_up = (
+        screen.KEYEVENTF_UNICODE,
+        screen.KEYEVENTF_UNICODE | screen.KEYEVENTF_KEYUP,
+    )
+    assert events == [
+        (0, ord("A"), unicode_down),
+        (0, ord("A"), unicode_up),
+        (0, ord("你"), unicode_down),
+        (0, ord("你"), unicode_up),
+    ]
+    assert screen._held == set()  # a character is not a key that can be left down
+
+
+def test_typing_paces_characters_and_stops_pacing_at_the_end(monkeypatch):
+    """Typer's own knob: a gap between characters, none after the last one."""
+    _char_events(monkeypatch)
+    slept: list[float] = []
+    monkeypatch.setattr(screen.time, "sleep", lambda seconds: slept.append(seconds))
+    screen.type_text("abc", delay=0.05)
+    assert slept == [0.05, 0.05]  # between a-b and b-c; typing the copy is not followed by a pause
+
+
+def test_an_emoji_is_sent_as_a_surrogate_pair(monkeypatch):
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    typed, _error = screen.type_text("😀")
+    assert typed == 1
+    unicode_down = screen.KEYEVENTF_UNICODE
+    assert [scan for _vk, scan, flags in events if flags == unicode_down] == [0xD83D, 0xDE00]
+
+
+def test_a_newline_is_enter_not_the_unicode_character(monkeypatch):
+    """Typer maps '\\n' to Enter for a reason: U+000A is not what an app reads as
+    'next line'."""
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    typed, error = screen.type_text("a\nb")
+    assert (typed, error) == (3, None)
+    assert events[2] == (0x0D, 0, 0) and events[3] == (0x0D, 0, screen.KEYEVENTF_KEYUP)
+    assert all(flags & screen.KEYEVENTF_UNICODE == 0 for _vk, _scan, flags in events[2:4])
+
+
+def test_a_refused_character_stops_the_run_and_reports_what_landed(monkeypatch):
+    """The text that already arrived is a fact the caller must be told."""
+    events = _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        screen, "_send", lambda payload: events.append(None) or (0 if len(events) > 4 else 1)
+    )
+    typed, error = screen.type_text("abcd")
+    assert typed == 2 and error and "already been typed" in error and "2 character" in error
+    assert screen._held == set()
+
+
+def test_the_default_pace_is_one_a_person_can_watch(monkeypatch):
+    """User 2026-09-14: 一秒 5 到 10 个字就差不多了. A default fast enough that the text
+    lands in a blur is indistinguishable from a paste, which is why the paste route is
+    gone — so this measures the clock rather than echoing the constant."""
+    _char_events(monkeypatch)
+    started = time.monotonic()
+    typed, error = screen.type_text("一二三四五")  # no char_delay: the shipped default
+    elapsed = time.monotonic() - started
+    assert (typed, error) == (5, None)
+    assert elapsed >= 4 * 0.1, f"five characters landed in {elapsed:.2f}s — a blur, not typing"
+    assert elapsed <= 4 * 0.2 + 0.5, (
+        f"five characters took {elapsed:.2f}s — past the pace asked for"
+    )
+
+
+def test_a_stop_press_ends_a_typed_run_within_one_character(monkeypatch):
+    """A paragraph at a human pace is a minute of typing, so the run answers a stop
+    press *while* it runs — the 0.2s rule the shell tool already keeps."""
+    _char_events(monkeypatch)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    abort = {"on": False}
+    typed, error = screen.type_text("一二三四五", delay=0.15, should_abort=lambda: abort["on"])
+    assert (typed, error) == (5, None)  # nobody pressed anything: all five land
+
+    abort["on"] = True
+    typed, error = screen.type_text("一二三四五", delay=0.15, should_abort=lambda: abort["on"])
+    assert typed == 0 and error and "aborted" in error
+
+
+def test_typing_is_the_only_route_and_never_touches_the_clipboard(monkeypatch):
+    """User ruling, 2026-09-14: 「不要提供全文粘贴这种方式 …… 我们要做输入，就只有一种方式，
+    逐字复制」. So `type` always types, and the clipboard half of this tool is gone —
+    there is nothing left that could spend the user's clipboard."""
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
+    monkeypatch.setattr(screen, "send_keys", lambda names: pytest.fail(f"pressed {names}"))
+    typed: list[str] = []
+    monkeypatch.setattr(
+        screen,
+        "type_text",
+        lambda text, delay=0, should_abort=None: typed.append(text) or (len(text), None),
+    )
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+
+    # No style at all is the normal call now, and it types.
+    out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
+    assert typed == ["你好"]
+    assert "逐字输入" in out and "typed: 2/2 characters" in out
+    assert "the clipboard is never touched" in out
+    assert "clipboard restored" not in out  # nothing to restore: it was never used
+
+    # Asking for the clipboard route is refused, and says why.
+    refused = str(
+        screen._action_type({"hwnd": 42, "text": "你好", "style": "paste"}, None, None, None, None)
+    )
+    assert refused.startswith("ERROR: there is no 'paste' route")
+    assert typed == ["你好"]  # nothing was typed on that call either
+
+    # The tool face does not offer it: no clipboard function survives in the module,
+    # and the model has no `style` to ask with.
+    for name in ("set_clipboard_text", "snapshot_clipboard", "restore_clipboard", "clipboard_text"):
+        assert not hasattr(screen, name), f"{name} should have been deleted with the paste route"
+    assert "style" not in screen.SCHEMA["function"]["parameters"]["properties"]
+
+
+# ── the armed window (spec §35.2) ──────────────────────────────────────────
+def test_disarm_releases_keys_and_forgets_frames(monkeypatch):
+    released = []
+    monkeypatch.setattr(screen, "release_all_keys", lambda: released.append(True) or ["0x11"])
+    screen._session.labels = {"发送": _cand(0, "发送", "", (1, 2, 3, 4), (), "visual")}
+    screen._session.remember(_frame())
+    screen.disarm()
+    assert released
+    assert screen._session.labels == {} and len(screen._session.frames) == 0
+
+
+def test_an_input_action_asks_nothing_and_pops_no_notice(monkeypatch):
+    """Consent is the settings switch (user decision 2026-09-13): no card per
+    action, and no toast either — a notification lands on top of the very screen
+    being driven (spec §35.14)."""
+    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: pytest.fail("asked the user"))
+    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: "no shell entry")
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(42, "demo", "Notepad", (0, 0, 5, 5), 5, "notepad.exe", "normal")
+        ],
+    )
+    # A window with a readable control: `wake_window` asks `shell_reason` first, and an
+    # unreadable one would send it to the shell path — and a *real* scan there needs
+    # comtypes, which CI does not install (that is exactly how this test failed CI on
+    # 2026-09-13: 480 passed, 1 failed, only in the comtypes-less environment).
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+
+    first_ok, _note = screen._guarded_input(42)
+    second_ok, _note = screen._guarded_input(42)
+    assert first_ok and second_ok
+    # The tool has no way to reach a tray any more: nothing can pop over the window
+    # it is about to measure and click.
+    assert not hasattr(screen, "set_notifier")
+
+
+def test_a_window_that_stays_off_screen_is_refused(monkeypatch):
+    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: "no shell entry")
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(42, "demo", "Notepad", (0, 0, 5, 5), 5, "notepad.exe", "hidden")
+        ],
+    )
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    ok, note = screen._guarded_input(42)
+    assert ok is False and "cannot be driven" in note
+
+
+def test_a_listing_number_resolves_against_the_live_window(monkeypatch):
+    element = object()
+    pairs = [
+        (_cand(1, "保存", "Button", (1000, 500, 1060, 530), ("Invoke",)), element),
+        (_cand(2, "", "Edit", (1000, 540, 1100, 570), ("Value",)), object()),
+    ]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    _listed(42, *(cand for cand, _ in pairs))
+
+    hit = screen.resolve_target(42, {"target": 1})
+    assert isinstance(hit, screen.Target) and hit.name == "保存"
+
+    stale = screen.resolve_target(42, {"target": 9})
+    assert isinstance(stale, str) and "no candidate #9" in stale
+
+
+def test_an_ambiguous_name_lists_the_candidates_instead_of_guessing(monkeypatch):
+    pairs = [
+        (_cand(1, "项目 01", "", (1000, 500, 1100, 520)), object()),
+        (_cand(2, "项目 02", "", (1000, 520, 1100, 540)), object()),
+    ]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "_ocr_targets", lambda *a, **k: [])
+    out = screen.resolve_target(42, {"name": "项目"})
+    assert isinstance(out, str) and "2 controls match" in out and "#1 " in out and "#2 " in out
+
+
+def test_a_control_without_an_accessible_name_is_found_by_its_class(monkeypatch):
+    """The listing prints `cls` for a nameless control ('Edit' with name ''), so
+    a model that reads that label has to be able to use it."""
+    pairs = [(_cand(1, "", "Edit", (1000, 500, 1100, 520), ("Value",)), object())]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    hit = screen.resolve_target(42, {"name": "Edit"})
+    assert isinstance(hit, screen.Target) and hit.cls == "Edit"
+
+
+def test_an_unknown_name_is_no_target_with_the_candidate_list(monkeypatch):
+    pairs = [(_cand(1, "保存", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    out = screen.resolve_target(42, {"name": "不存在的按钮"})
+    assert isinstance(out, str) and out.startswith("ERROR: no_target") and "保存" in out
+
+
+# ── a window that is not on screen is never measured or clicked ────────────
+def test_the_default_listing_is_what_the_user_can_see():
+    assert screen._keep_window("normal", "demo", include_hidden=False)
+    assert screen._keep_window("minimized", "demo", include_hidden=False)
+    assert not screen._keep_window("hidden", "tray-only", include_hidden=False)
+    assert not screen._keep_window("normal", "", include_hidden=False)
+    assert screen._keep_window("hidden", "tray-only", include_hidden=True)
+    assert screen._keep_window("normal", "", include_hidden=True)
+    assert not screen._keep_window("hidden", "", include_hidden=True)
+
+
+def test_the_report_marks_state_and_names_the_taskbar(monkeypatch):
+    wins = [
+        screen.Win(11, "demo", "Notepad", (0, 0, 400, 300), 5, "notepad.exe", "normal"),
+        screen.Win(12, "tray-only", "Tray", (0, 0, 200, 60), 6, "one.exe", "hidden"),
+        screen.Win(13, "", "Shell_TrayWnd", (0, 0, 2240, 72), 7, "explorer.exe", "untitled"),
+    ]
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: wins)
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 11)
+    text = screen._windows_report(include_hidden=True)
+    assert "[hidden]" in text and "Shell_TrayWnd" in text and "← foreground" in text
+    assert "targets(hwnd=" in text  # the tray path is stated, not left to be guessed
+    assert "the desktop is the" not in text  # no desktop row in this list: no claim about one
+
+
+def test_the_report_points_at_the_desktop_as_a_place_to_open_things(monkeypatch):
+    """The gap a real turn fell into (2026-09-14): asked to open WeChat, the model saw no
+    WeChat window, found no tray entry, and went off to `start` the exe from disk. The
+    desktop row was right there in the listing — nothing said it was the desktop."""
+    wins = [
+        screen.Win(11, "demo", "Notepad", (0, 0, 400, 300), 5, "notepad.exe", "normal"),
+        screen.Win(65864, "Program Manager", "Progman", (0, 0, 2240, 1400), 5, "explorer.exe"),
+    ]
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: wins)
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 11)
+    monkeypatch.setattr(screen, "_desktop_surface", lambda: 65864)
+    text = screen._windows_report()
+    assert "the desktop is the 0x10148 row" in text
+    assert "targets(hwnd=65864) lists the desktop icons" in text
+    assert "double_click(hwnd=<it>, name=<icon text>)" in text
+
+
+def test_a_hint_is_not_written_for_a_row_the_cap_cut_off(monkeypatch):
+    """Both hints name a row "above" — so they may only be written when that row is in
+    the listing. The desktop sorts last (bottom of the z-order), so a crowded screen is
+    exactly where the cap drops it."""
+    wins = [
+        screen.Win(11, "demo", "Notepad", (0, 0, 400, 300), 5, "notepad.exe", "normal"),
+        screen.Win(65864, "Program Manager", "Progman", (0, 0, 2240, 1400), 5, "explorer.exe"),
+        screen.Win(13, "", "Shell_TrayWnd", (0, 0, 2240, 72), 7, "explorer.exe", "untitled"),
+    ]
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: wins)
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 11)
+    monkeypatch.setattr(screen, "_desktop_surface", lambda: 65864)
+    assert "the desktop is the" in screen._windows_report()  # everything printed
+    cut = screen._windows_report(limit=1)  # only the Notepad row fits
+    assert "the desktop is the" not in cut and "Shell_TrayWnd row above" not in cut
+
+
+def test_targets_refuses_a_minimized_window_and_points_at_restore(monkeypatch):
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "minimized")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    out = screen._action_targets({"hwnd": 42})
+    assert isinstance(out, str) and "is minimized" in out and "action=restore" in out
+
+
+def test_a_covered_dpi_unaware_window_is_not_measured(monkeypatch):
+    """PrintWindow hands back a scaled stub for those, so the honest answer is an
+    error that names the way out — not a picture whose controls are 1.5x off."""
+    monkeypatch.setattr(screen, "_dpi_unaware", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "legacy")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 99)
+    problem = screen.capture_problem(7)
+    assert problem and "DPI-unaware" in problem and "restore" in problem
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 7)
+    assert screen.capture_problem(7) is None
+
+
+def test_shell_rows_are_matched_by_the_application_s_own_names():
+    """The taskbar names a button after the app's display name, not its exe
+    ('智能终端 - 1 个运行窗口' for WindowsTerminal.exe), so the window title is the
+    better token — and the tray tooltip carries it too."""
+    win = screen.Win(1, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+    rows = [
+        _cand(1, " Clash Verge 2.5.2", "", (0, 0, 5, 5)),
+        _cand(2, " QQ: 3754901636", "", (0, 0, 5, 5)),
+    ]
+    hit = screen._shell_row(rows, win)
+    assert hit is not None and "3754901636" in hit.name
+    titled = screen.Win(
+        2, "智能终端", "CASCADIA", (0, 0, 10, 10), 5, "WindowsTerminal.exe", "normal"
+    )
+    assert (
+        screen._shell_row([_cand(1, "智能终端 - 1 个运行窗口", "", (0, 0, 5, 5))], titled)
+        is not None
+    )
+    assert screen._shell_row([_cand(1, "无关的图标", "", (0, 0, 5, 5))], win) is None
+
+
+def test_a_taskbar_row_matches_the_window_whose_title_carries_its_app_name():
+    """Handoff 2026-09-13, item 5: shell_wake never matched 'Fungi - 文件资源管理器',
+    because the button is named after the *application* ('文件资源管理器 - 1 个运行窗口')
+    — so the row's application name has to be looked for inside the window title too."""
+    explorer = screen.Win(
+        1, "Fungi - 文件资源管理器", "CabinetWClass", (0, 0, 10, 10), 5, "explorer.exe", "normal"
+    )
+    row = _cand(
+        1, "文件资源管理器 - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (0, 0, 5, 5)
+    )
+    assert screen._shell_row([row], explorer) is row
+    assert screen._row_app_name("文件资源管理器 - 1 个运行窗口") == "文件资源管理器"
+    assert screen._row_app_name("QQ") == "QQ"  # a desktop icon carries no suffix
+
+
+# ── 触手可及: the window's own entry point on screen (spec §35.15) ─────────
+class _Shell:
+    """Stand-in for user32 in the at-hand tests: two surfaces, one hit test."""
+
+    def __init__(self, *, tray=900, desktop=800, at=None):
+        self.tray, self.desktop = tray, desktop
+        self.at = desktop if at is None else at
+
+    def FindWindowW(self, cls, _after):  # noqa: N802 (mimics user32)
+        return self.tray if cls == "Shell_TrayWnd" else 0
+
+    def FindWindowExW(self, hwnd, _after, cls, _cls2):  # noqa: N802 (mimics user32)
+        return 7 if cls == "SHELLDLL_DefView" and hwnd == self.desktop else 0
+
+    def WindowFromPoint(self, _point):  # noqa: N802 (mimics user32)
+        return self.at
+
+    def GetAncestor(self, hwnd, _flag):  # noqa: N802 (mimics user32)
+        return hwnd
+
+    def GetForegroundWindow(self):  # noqa: N802 (mimics user32)
+        return self.tray
+
+
+_TASKBAR_BOX = (0, 1328, 2240, 1400)
+_DESKTOP_BOX = (0, 0, 2240, 1400)
+_PROGMAN = screen.Win(800, "Program Manager", "Progman", (0, 0, 2240, 1400), 5, "explorer.exe")
+
+
+def _qq():
+    return screen.Win(1, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+
+
+def _shell_env(monkeypatch, surfaces, wins=None):
+    """Wire the shell surfaces: `surfaces` maps hwnd → list of (Target, element)."""
+    monkeypatch.setattr(screen, "_u32", _Shell())
+    monkeypatch.setattr(
+        screen, "list_windows", lambda include_hidden=False: wins or [_PROGMAN, _qq()]
+    )
+    monkeypatch.setattr(
+        screen, "window_rect", lambda hwnd: _TASKBAR_BOX if hwnd == 900 else _DESKTOP_BOX
+    )
+    monkeypatch.setattr(
+        screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: surfaces.get(hwnd, [])
+    )
+
+
+def test_at_hand_prefers_the_running_window_over_the_desktop_icon(monkeypatch):
+    """The entry is looked for on the taskbar and in the tray first: that click
+    *activates* the window that is already running, while a desktop icon is a
+    double-click that may launch another instance (user decision 2026-09-13)."""
+    button = _cand(
+        1, "QQ - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (1000, 1330, 1060, 1398)
+    )
+    icon = _cand(1, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {900: [(button, object())], 800: [(icon, object())]})
+    entry = screen.at_hand(_qq())
+    assert entry is not None
+    assert entry.where == "任务栏按钮" and entry.clicks == 1 and entry.surface == 900
+    assert entry.raise_first  # the taskbar gets raised first, as the measured path did
+
+
+def test_a_tray_icon_is_named_as_one_however_it_is_drawn(monkeypatch):
+    """The strip's rows carry their own class (SystemTray.*) against the taskbar
+    buttons' (Taskbar.TaskListButton*) — that is what the report calls them by."""
+    tray_icon = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1850, 1330, 1898, 1398))
+    _shell_env(monkeypatch, {900: [(tray_icon, object())]})
+    entry = screen.at_hand(_qq())
+    assert entry is not None and entry.where == "托盘图标" and entry.label.startswith("QQ:")
+
+
+def test_a_desktop_icon_is_double_clicked_and_only_while_it_is_on_top(monkeypatch):
+    """The desktop path is the last resort *and* a guarded one: anything maximized
+    covers the icons with it, and a blind double-click would land on that window
+    (measured on this box: a browser's render host answered WindowFromPoint)."""
+    icon = _cand(1, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {800: [(icon, object())]})
+    entry = screen.at_hand(_qq())
+    assert entry is not None and entry.where == "桌面图标" and entry.clicks == 2
+
+    monkeypatch.setattr(screen, "_u32", _Shell(at=0x46082E))  # something covers it
+    assert screen.at_hand(_qq()) is None
+
+
+def test_a_container_row_is_not_an_entry(monkeypatch):
+    """Both surfaces expose their own container as a row covering everything (the
+    desktop's '桌面' SysListView32 is 2240x1400): a click there opens nothing."""
+    container = _cand(1, "桌面", "SysListView32", (0, 0, 2240, 1400))
+    icon = _cand(2, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {800: [(container, object()), (icon, object())]})
+    assert [c.name for c in screen._surface_rows(800)] == ["QQ"]
+
+
+def test_a_pinned_button_is_not_a_way_to_a_window(monkeypatch):
+    """ "已固定" is the form Windows shows while the application is *not* running, so
+    clicking it would launch something rather than open the window we hold."""
+    pinned = _cand(
+        1, "Everything 已固定", "Taskbar.TaskListButtonAutomationPeer", (900, 1330, 960, 1398)
+    )
+    _shell_env(monkeypatch, {900: [(pinned, object())]})
+    assert screen._surface_rows(900) == []
+    assert screen.at_hand(_qq()) is None
+
+
+def test_a_tray_tooltip_never_claims_a_foreign_window():
+    """A tray tooltip is free-form text the app chooses, and measured on this box one
+    of them is the bare word 'Fungi' — which is also the first word of an Edge window's
+    title. The app-name direction belongs to taskbar buttons and desktop icons."""
+    edge = screen.Win(
+        1,
+        "Fungi - 个人 - Microsoft\u200b Edge",
+        "Chrome_WidgetWin_1",
+        (0, 0, 10, 10),
+        5,
+        "msedge.exe",
+        "normal",
+    )
+    tooltip = _cand(1, "Fungi", "SystemTray.NormalButton", (1884, 1184, 1944, 1244))
+    button = _cand(
+        2, "Microsoft Edge - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (0, 0, 5, 5)
+    )
+    assert screen._shell_row([tooltip], edge) is None
+    assert screen._shell_row([tooltip, button], edge) is button
+
+
+def test_the_flyout_counts_as_open_only_while_it_is_shown(monkeypatch):
+    """It is not created on demand: measured, the island window already exists hidden
+    before the arrow is ever clicked — so an Escape sent on *existence* would go to
+    whatever window has the focus instead of closing a flyout."""
+    hidden = screen.Win(
+        31,
+        "",
+        "TopLevelWindowForOverflowXamlIsland",
+        (1700, 1180, 2040, 1330),
+        5,
+        "explorer.exe",
+        "hidden",
+    )
+    _shell_env(monkeypatch, {}, wins=[hidden, _qq()])
+    monkeypatch.setattr(screen, "send_keys", lambda keys: pytest.fail(f"sent {keys}"))
+    screen._close_tray_flyout()
+    shown = screen.Win(
+        31,
+        "",
+        "TopLevelWindowForOverflowXamlIsland",
+        (1700, 1180, 2040, 1330),
+        5,
+        "explorer.exe",
+        "normal",
+    )
+    assert screen._tray_flyout() is None
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: [shown, _qq()])
+    assert screen._tray_flyout() is shown
+    sent: list[list[str]] = []
+    monkeypatch.setattr(screen, "send_keys", lambda keys: sent.append(keys))
+    screen._close_tray_flyout()
+    assert sent == [["escape"]]
+
+
+def test_the_tray_icon_is_looked_for_behind_the_arrow(monkeypatch):
+    """The tray branch, in the user's words: click the arrow to expand the hidden
+    icons, then single-click the one that belongs to the window."""
+    arrow = _cand(1, "显示隐藏的图标", "SystemTray.NormalButton", (1829, 1328, 1877, 1400))
+    hidden_icon = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1183, 2029, 1327))
+    flyout = screen.Win(
+        31, "", "TopLevelWindowForOverflowXamlIsland", (1700, 1180, 2040, 1330), 5, "explorer.exe"
+    )
+    state = {"open": False}
+    clicked: list[tuple[int, int]] = []
+
+    def _wins(include_hidden=False):
+        island = screen.Win(
+            31,
+            "",
+            flyout.cls,
+            flyout.rect,
+            5,
+            "explorer.exe",
+            "normal" if state["open"] else "hidden",
+        )
+        return [island, _qq()]
+
+    def _click(x, y, **kwargs):
+        clicked.append((x, y))
+        state["open"] = True  # the arrow is what opens it
+
+    _shell_env(monkeypatch, {900: [(arrow, object())], 31: [(hidden_icon, object())]})
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    entry = screen.at_hand(_qq())
+    assert clicked == [arrow.center]  # only the arrow, not the icon: at_hand finds, it does not act
+    assert entry is not None and entry.where == "托盘图标" and entry.clicks == 1
+    assert entry.label == "QQ: 3754901636"
+
+    # The arrow is a toggle (measured): with the flyout already open, clicking it would
+    # *close* it and the search would come back empty.
+    state["open"] = True
+    clicked.clear()
+    entry = screen.at_hand(_qq())
+    assert clicked == [] and entry is not None and entry.where == "托盘图标"
+
+
+def test_a_tray_click_that_opens_another_window_says_which(monkeypatch):
+    """Measured on OneDrive: clicking its tray icon raises the 'Activity Center' while
+    the window we hold stays a hidden balloon host. The click did something, so the
+    report has to name what appeared instead of 'stayed hidden'."""
+    icon = _cand(1, " OneDrive - 个人", "SystemTray.NormalButton", (1764, 1216, 1824, 1275))
+    held = screen.Win(
+        5, "OneDrive - 个人", "SkyDrive", (0, 0, 194, 56), 7, "OneDrive.exe", "hidden"
+    )
+    _shell_env(monkeypatch, {900: [(icon, object())]}, wins=[_PROGMAN, _qq(), held])
+    state = {"clicked": False}
+
+    def _wins(include_hidden=False):
+        rows = [_PROGMAN, _qq(), held]
+        if state["clicked"]:
+            rows.append(
+                screen.Win(
+                    6, "Activity Center", "SkyDrive", (1513, 202, 2053, 1162), 7, "OneDrive.exe"
+                )
+            )
+        return rows
+
+    def _click(*_a, **_k):
+        state["clicked"] = True
+
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen, "_await_state", lambda hwnd, want, timeout: False)
+    assert (
+        screen.shell_wake(5)
+        == "clicked its 托盘图标 'OneDrive - 个人' and it opened 'Activity Center' instead"
+    )
+
+
+def test_the_window_already_in_front_is_never_clicked(monkeypatch):
+    """Clicking the taskbar button of the window that is already in front
+    *minimizes* it — Windows toggles on that click, so there is nothing to open."""
+    monkeypatch.setattr(screen, "list_windows", lambda include_hidden=False: [_qq()])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 1)
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: pytest.fail("clicked"))
+    assert "in front" in screen.shell_wake(1)
+
+
+def test_shell_wake_says_so_when_nothing_is_at_hand(monkeypatch):
+    """No taskbar button, no tray icon, no desktop icon: the honest report is that
+    there is nothing to click — the OS wake that follows is the likely zombie."""
+    _shell_env(monkeypatch, {})
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: pytest.fail("clicked"))
+    assert "no entry at hand" in screen.shell_wake(1)
+
+
+def test_a_desktop_double_click_that_launches_reports_the_window_it_opened(monkeypatch):
+    """A desktop icon is the door to the *application*: a multi-instance app starts
+    another process, and then the effect is a new window — the same evidence rule
+    the double_click action uses (spec §35.13)."""
+    icon = _cand(1, "QQ", "", (117, 5, 233, 96))
+    _shell_env(monkeypatch, {800: [(icon, object())]})
+    clicked: list[int] = []
+    state = {"clicked": False}
+
+    def _wins(include_hidden=False):
+        rows = [_PROGMAN, _qq()]
+        if state["clicked"]:
+            rows.append(screen.Win(9, "QQ", "Chrome_WidgetWin_1", (0, 0, 9, 9), 5, "QQ.exe"))
+        return rows
+
+    def _click(*_a, **kwargs):
+        state["clicked"] = True
+        clicked.append(kwargs.get("clicks"))
+
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen, "_await_state", lambda hwnd, want, timeout: False)
+    out = screen.shell_wake(1)
+    assert clicked == [2]  # a desktop icon opens on the second click
+    assert "opened" in out and "instead" in out
+
+
+def test_restore_reaches_for_the_shell_when_the_window_stays_asleep(monkeypatch):
+    """A tray-resident app woken with ShowWindow alone offers no named controls
+    (its renderer and a11y are still asleep); restore then does what the user does
+    and clicks its shell entry (measured on QQ, 2026-09-13)."""
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "QQ")
+    monkeypatch.setattr(screen, "_named_a11y", lambda hwnd: 0)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(42, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+        ],
+    )
+    woken: list[int] = []
+    monkeypatch.setattr(
+        screen, "shell_wake", lambda hwnd: woken.append(hwnd) or "clicked its tray icon ' QQ'"
+    )
+
+    out = str(screen._action_restore({"hwnd": 42}))
+    assert woken == [42]
+    assert "shell wake first" in out and "tray icon" in out
+
+
+def test_the_up_front_condition_names_why_the_shell_is_needed(monkeypatch):
+    """Decided before anything is touched (user's ask, 2026-09-13): a tray-resident
+    or self-drawn window goes to the shell path first, a healthy one does not."""
+    qq = screen.Win(1, "QQ", "Chrome_WidgetWin_1", (0, 0, 10, 10), 5, "QQ.exe", "normal")
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    assert "nothing addressable" in screen.shell_reason(1, qq)
+
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    assert "is hidden" in screen.shell_reason(1, qq)
+
+    named = [(_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: named)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    assert screen.shell_reason(1, qq) is None  # alive and on screen: no help needed
+    assert "just brought back" in screen.shell_reason(1, qq, just_woken=True)
+
+
+def test_restore_leaves_an_awake_window_alone(monkeypatch):
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(screen, "_named_a11y", lambda hwnd: 12)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: pytest.fail("clicked the shell"))
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+
+    out = str(screen._action_restore({"hwnd": 42}))
+    assert "named controls: 12" in out and "shell wake" not in out
+
+
+def test_restore_window_only_never_touches_the_shell(monkeypatch):
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(screen, "_named_a11y", lambda hwnd: 0)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    monkeypatch.setattr(screen, "shell_wake", lambda hwnd: pytest.fail("clicked the shell"))
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+
+    out = str(screen._action_restore({"hwnd": 42, "via": "window"}))
+    assert "shell wake" not in out
+
+
+def test_waking_a_window_reports_what_it_was(monkeypatch):
+    states = iter(["minimized", "normal"])
+    u32 = _U32()
+    monkeypatch.setattr(screen, "_u32", u32)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: next(states, "normal"))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    assert screen.ensure_on_screen(11) == "minimized"
+    assert u32.shown == [(11, screen.SW_RESTORE)]
+
+
+# ── the result the model gets: a summary plus real pixels ──────────────────
+def test_a_frame_comes_back_as_pixels_the_model_can_see():
+    result = screen._attach("SCREEN 40x30", _frame())
+    assert isinstance(result, ImageRead) and str(result).startswith("SCREEN 40x30")
+    assert result.data_url.startswith("data:image/png;base64,")
+
+
+def test_the_numbered_frame_marks_every_candidate():
+    frame = _frame((60, 40))
+    marked = screen._mark_targets(
+        frame, [_cand(1, "保存", "Button", (1010, 510, 1030, 530), ("Invoke",))]
+    )
+    assert marked.size == frame.image.size
+    assert marked.tobytes() != frame.image.tobytes()
+
+
+def test_the_frame_diff_counts_pixels_not_promises():
+    before = _frame((50, 50), (0, 0, 0))
+    assert screen._diff_ratio(before, _frame((50, 50), (0, 0, 0))) == 0.0
+    one_pixel = _frame((50, 50), (0, 0, 0)).image.copy()
+    one_pixel.putpixel((5, 5), (255, 255, 255))
+    assert 0 < screen._diff_ratio(before, screen.Frame(one_pixel, before.origin, 42, 0.0)) < 0.01
+    assert screen._diff_ratio(before, _frame((60, 50))) == 1.0
+
+
+def test_a_self_drawn_window_falls_back_to_ocr_text(monkeypatch):
+    """WeChat 4.x exposes one pattern-less surface element and nothing else; the
+    listing used to hand that back as the only target. Now the picture's text is
+    offered instead (spec §35.1's a11y-then-OCR order)."""
+    surface = _cand(1, "MMUIRenderSubWindow", "", (0, 0, 1200, 800), ())
+    monkeypatch.setattr(
+        screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [(surface, object())]
+    )
+    monkeypatch.setattr(
+        screen,
+        "_ocr_targets",
+        lambda frame, start=0: [_cand(start + 1, "搜索", "", (10, 20, 90, 44), ())],
+    )
+    monkeypatch.setattr(screen, "_u32", _U32(client=(0, 0, 1200, 800)))
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((300, 200)))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "微信")
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert "OCR" in out and "搜索" in out
+    assert screen._session.listings[42].candidates[2].name == "搜索"
+
+
+def test_a_self_drawn_window_is_judged_before_the_picture_is_read(monkeypatch):
+    """User rule 2026-09-14: 对于特殊的自绘界面，事先判断并也采用桌控 — the pixel tiers are the
+    tool face for these windows, not a fallback discovered by watching a11y fail."""
+    monkeypatch.setattr(screen, "inside_client", lambda hwnd, target: True)
+
+    # QQ's signature: a self-drawn class with anonymous shells (no name, no pattern)
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Chrome_WidgetWin_1")
+    anonymous = [(_cand(1, "", "ScrollItem", (0, 0, 5, 5)), object()) for _ in range(7)]
+    reason = screen.self_drawn_reason(42, anonymous)
+    assert "self-drawn family" in reason and "Chrome_WidgetWin_1" in reason
+
+    # WeChat 4.x: one named surface element, no pattern, over the whole client area
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Qt5152QWindowIcon")
+    surface = [(_cand(1, "MMUIRenderSubWindowHW", "", (0, 0, 5, 5)), object())]
+    assert "nothing inside its client area" in screen.self_drawn_reason(42, surface)
+
+    # A real control inside the client area wins, whatever the class says
+    real = [(_cand(1, "保存", "Button", (0, 0, 5, 5), ("Invoke",)), object())]
+    assert screen.self_drawn_reason(42, real) is None
+
+    # Chromium that DOES expose named controls (Edge) must not be judged self-drawn:
+    # the class alone is never enough.
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Chrome_WidgetWin_1")
+    assert screen.self_drawn_reason(42, real) is None
+
+    # …and a named control that lives outside the client area (the title bar's own
+    # buttons) does not count either.
+    monkeypatch.setattr(screen, "inside_client", lambda hwnd, target: False)
+    assert screen.self_drawn_reason(42, real) is not None
+
+
+def test_the_listing_says_it_is_self_drawn_before_listing_the_pixels(monkeypatch):
+    """The model should not have to infer 'this one draws itself' from the absence of
+    names — the note leads with it."""
+    pairs = [(_cand(1, "MMUIRenderSubWindow", "", (0, 0, 200, 200)), object())]
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 200)))
+    monkeypatch.setattr(screen, "_mark_targets", lambda frame, targets: frame.image)
+    monkeypatch.setattr(screen, "_ocr_targets", lambda frame, start=0: [])
+    monkeypatch.setattr(
+        screen,
+        "_visual_targets",
+        lambda frame, start=0: [_cand(start + 1, "", "", (10, 10, 40, 40))],
+    )
+    monkeypatch.setattr(screen, "inside_client", lambda hwnd, target: True)
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Qt5152QWindowIcon")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "微信")
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert "self-drawn:" in out
+    assert out.index("self-drawn:") < out.index("a11y has nothing clickable here")
+    assert "shapes the program cut out of the picture" in out
+
+
+def test_the_whole_surface_of_a_self_drawn_window_is_not_clickable(monkeypatch):
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 1200, 800))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # the target window is on top
+    surface = screen.Target(1, "MMUIRenderSubWindow", "", (0, 0, 1200, 800), ())
+    problem = screen.target_problem(42, surface)
+    assert problem and "whole window surface" in problem and "name=<text>" in problem
+
+    editor = screen.Target(2, "文本编辑器", "RichEditD2DPT", (10, 10, 1180, 780), ("Value",))
+    assert screen.target_problem(42, editor) is None  # a real control, even a big one
+    small = screen.Target(3, "搜索", "", (100, 100, 200, 130), ())
+    assert screen.target_problem(42, small) is None
+
+
+def test_a_covered_target_is_refused_and_names_what_covers_it(monkeypatch):
+    """Measured 2026-09-14: the desktop's own 微信 icon keeps its rectangle in the a11y
+    tree while a terminal covers it — so a rectangle is not permission to click. The
+    desktop shortcut is the case that made this visible: 'why did it not see it' was
+    really 'it saw it and refused to click the terminal instead'."""
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 2240, 1400))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 0x5A0938)
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "π : Remove GUI popup")
+    problem = screen.target_problem(42, _cand(1, "微信", "", (117, 147, 233, 238), ("Invoke",)))
+    assert problem and "covered" in problem
+    assert "π : Remove GUI popup" in problem and "0x5A0938" in problem
+
+    monkeypatch.setattr(screen, "covering_window", lambda point: 0)  # nothing there at all
+    assert "no window answers" in screen.target_problem(
+        42, _cand(1, "微信", "", (117, 147, 233, 238), ("Invoke",))
+    )
+
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # ours, on top
+    assert screen.target_problem(42, _cand(1, "微信", "", (117, 147, 233, 238), ())) is None
+
+
+def test_a_target_outside_its_window_is_refused(monkeypatch):
+    """The case that put a click on a desktop file: a resolved rectangle that is
+    not inside the window it was resolved for."""
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 500, 1400, 800))
+    outside = screen.Target(1, "搜索", "", (100, 100, 200, 130), ())
+    problem = screen.target_problem(42, outside)
+    assert problem and "outside window" in problem and "underneath" in problem
+
+
+def test_a_blank_capture_of_a_covered_window_is_not_an_answer(monkeypatch):
+    """A single-colour bitmap from a covered Chromium surface must come back as
+    "cannot read it", never as a picture that says the panel is empty — that wrong
+    answer looks like a real one (2026-09-13)."""
+    monkeypatch.setattr(screen, "_ensure_dpi", lambda: None)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 100, 100))
+    monkeypatch.setattr(screen, "_dpi_unaware", lambda hwnd: False)
+    monkeypatch.setattr(
+        screen, "_print_window", lambda hwnd, rect: _frame((100, 100), (32, 32, 32), (0, 0))
+    )
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 99)
+    assert screen.grab_window(42) is None
+
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 42)  # front: a black window is real
+    assert screen.grab_window(42) is not None
+
+
+def test_the_program_binarises_and_numbers_what_has_no_text():
+    """The prototype's third tier (spec §35.1): the threshold happens inside the
+    program and the model gets numbers — never the binary image, which cost it
+    21-296px of error and 3x the latency when it was fed the picture."""
+    image = Image.new("RGB", (300, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 30, 160, 80), fill=(47, 111, 208))  # a drawn control, no text
+    frame = screen.Frame(image, (1000, 500), 42, time.time())
+
+    boxes = screen._visual_boxes(image)
+    assert any(
+        abs(box[0] - 40) <= 4 and abs(box[1] - 30) <= 4 and box[2] >= 158 for box in boxes
+    ), boxes
+
+    targets = screen._visual_targets(frame)
+    assert targets and targets[0].source == "visual"
+    assert "[shape]" in targets[0].label and "(no text)" in targets[0].label
+    # screen coordinates, ready to click: the frame origin is added back
+    assert targets[0].rect[0] >= 1000 and targets[0].rect[1] >= 500
+
+
+def test_a11y_controls_keep_the_picture_tiers_out_of_the_way(monkeypatch):
+    """Priority order, and its cost argument: when a11y has something clickable,
+    neither OCR nor shape cutting runs at all."""
+    pairs = [(_cand(1, "保存", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())]
+    called: list[str] = []
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "_ocr_targets", lambda *a, **k: called.append("ocr") or [])
+    monkeypatch.setattr(screen, "_visual_targets", lambda *a, **k: called.append("visual") or [])
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((300, 200)))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert called == [] and "保存" in out and "[shape]" not in out
+
+
+def test_unnamed_electron_shells_do_not_switch_the_picture_tiers_off(monkeypatch):
+    """QQ (Electron) exposes seven identical unnamed, classless ScrollItem shells
+    covering the whole client area. Counting those as "a11y already offers
+    something" is why OCR never ran on it and the model saw no text at all."""
+    shells = [
+        (_cand(n, "", "", (504, 228, 1737, 1101), ("ScrollItem",)), object()) for n in range(1, 8)
+    ]
+    called: list[str] = []
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: shells)
+    monkeypatch.setattr(
+        screen,
+        "_ocr_targets",
+        lambda frame, start=0: called.append("ocr")
+        or [_cand(start + 1, "九佾", "", (973, 316, 1031, 346))],
+    )
+    monkeypatch.setattr(screen, "_visual_targets", lambda *a, **k: [])
+    monkeypatch.setattr(screen, "_u32", _U32(client=(504, 228, 1737, 1101)))
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(
+        screen, "grab_window", lambda hwnd: _frame((1200, 870), (255, 255, 255), (504, 228))
+    )
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "QQ")
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert called == ["ocr"] and "九佾" in out
+    # …and the anonymous shells themselves are not offered as targets
+    assert "[ScrollItem]" not in out
+    # …and a control with a class still counts as addressable, so nothing is added
+    named = [(_cand(1, "", "Edit", (600, 300, 900, 340), ("Value",)), object())]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: named)
+    called.clear()
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert called == [] and "cls=Edit" in out
+
+
+def test_a_shape_that_is_only_the_ink_of_a_text_box_is_dropped(monkeypatch):
+    """The prototype merged these by IoU: a blob inside a text box is that text's
+    own strokes, and listing it twice would offer two targets for one thing."""
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(
+        screen,
+        "_ocr_targets",
+        lambda frame, start=0: [_cand(start + 1, "确定", "", (1000, 500, 1100, 540))],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_visual_targets",
+        lambda frame, start=0: [
+            _cand(start + 1, "", "", (1002, 502, 1098, 538), (), "visual"),
+            _cand(start + 2, "", "", (1200, 600, 1260, 660), (), "visual"),
+        ],
+    )
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((400, 300)))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "微信")
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert "#1 [text] '确定'" in out
+    assert out.count("[shape]") == 1
+    assert "#2 [shape]" in out  # renumbered, so the listing has no gap
+    assert screen._session.listings[42].candidates[2].source == "visual"
+
+
+def test_a_listing_says_where_its_candidates_came_from(monkeypatch):
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(
+        screen,
+        "_ocr_targets",
+        lambda frame, start=0: [_cand(start + 1, "搜索", "", (1000, 500, 1060, 530))],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_visual_targets",
+        lambda frame, start=0: [_cand(start + 1, "", "", (1200, 600, 1260, 660), (), "visual")],
+    )
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((400, 300)))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "微信")
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert "no a11y at all" in out and "1 text boxes read off the picture by OCR" in out
+    assert "1 shapes the program cut out of the picture" in out
+
+
+def test_the_window_border_does_not_swallow_the_candidates():
+    """The border is a connected ring whose bounding box is the whole frame; the
+    prototype filtered by size first, and merging first let that ring eat every
+    real candidate (measured on the canvas probe, 2026-09-13)."""
+    image = Image.new("RGB", (400, 300), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 399, 299), outline=(0, 0, 0), width=2)  # the window border
+    draw.rectangle((100, 100, 200, 150), fill=(40, 90, 190))  # what is actually there
+
+    boxes = screen._visual_boxes(image)
+    assert any(
+        abs(box[0] - 100) <= 6 and abs(box[1] - 100) <= 6 and box[2] >= 195 for box in boxes
+    ), boxes
+    assert all(box[2] - box[0] < 0.9 * 400 or box[3] - box[1] < 0.9 * 300 for box in boxes)
+
+
+def test_a_number_from_the_picture_keeps_its_own_rectangle(monkeypatch):
+    """A shape or OCR candidate must not be re-matched against a11y elements: two
+    elements with empty names matched each other and the click went to the wrong
+    place (2026-09-13)."""
+    shape = _cand(8, "", "", (1305, 261, 1461, 416), (), "visual")
+    a11y = [(_cand(4, "", "", (852, 131, 2178, 173), ("Value",)), object())]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: a11y)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (852, 131, 2178, 173))
+    _listed(42, shape, rect=(852, 131, 2178, 173))
+
+    hit = screen.resolve_target(42, {"target": 8})
+    assert isinstance(hit, screen.Target) and hit.rect == (1305, 261, 1461, 416)
+
+
+def test_a_number_from_the_picture_expires_when_the_window_moves(monkeypatch):
+    """Those rectangles are screen coordinates cut out of one specific picture, so
+    a window that moved makes them wrong rather than stale-but-usable."""
+    shape = _cand(8, "", "", (1305, 261, 1461, 416), (), "visual")
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (852, 231, 2178, 273))
+    _listed(42, shape, rect=(852, 131, 2178, 173))
+
+    out = screen.resolve_target(42, {"target": 8})
+    assert isinstance(out, str) and "moved or resized" in out and "run targets again" in out
+
+
+def test_an_element_without_a_name_or_class_is_never_matched():
+    """Nothing identifies it, so any match would be a guess."""
+    wanted = screen.Target(1, "", "", (10, 10, 50, 30), ("Value",))
+    pairs = [(screen.Target(4, "", "", (100, 100, 200, 140), ("Value",)), "element")]
+    assert screen._match_element(pairs, wanted) is None
+
+
+def test_labelling_a_shape_makes_its_name_stick(monkeypatch):
+    """The model decides which shape is the send button (it is the one looking at
+    the picture); the program makes that choice stick, so the next listing shows
+    发送 instead of '(no text)' (spec §35.10)."""
+    shape = _cand(8, "", "", (1305, 261, 1461, 416), (), "visual")
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (852, 131, 2178, 173))
+    _listed(42, shape, rect=(852, 131, 2178, 173))
+
+    out = screen._action_label({"hwnd": 42, "target": 8, "label": " 发送 "})
+    assert out.startswith("LABELLED '发送'") and "labels here: 发送" in out
+
+    hit = screen.resolve_target(42, {"name": "发送"})
+    assert isinstance(hit, screen.Target) and hit.rect == (1305, 261, 1461, 416)
+    assert screen.resolve_target(42, {"name": "发"}) is not None  # substring works too
+
+
+def test_a_label_stops_working_when_the_window_moves(monkeypatch):
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    screen._session.labels = {"发送": _cand(0, "发送", "", (1305, 261, 1461, 416), (), "visual")}
+    screen._session.labels_hwnd = 42
+    screen._session.labels_rect = (852, 131, 2178, 173)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (852, 231, 2178, 273))
+
+    out = screen.resolve_target(42, {"name": "发送"})
+    assert isinstance(out, str) and "moved or resized since you labelled" in out
+
+
+def test_labels_are_listed_back_when_a_name_matches_nothing(monkeypatch):
+    """`no_target` is decided by the program, so it also has to say what the
+    program does know — otherwise the model re-labels the same shape forever."""
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "保存", "Button", (1000, 500, 1060, 530)), object())
+        ],
+    )
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: None)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 500, 1400, 800))
+    screen._session.labels = {"发送": _cand(0, "发送", "", (1010, 510, 1060, 530), (), "visual")}
+    screen._session.labels_hwnd = 42
+    screen._session.labels_rect = (1000, 500, 1400, 800)
+
+    out = screen.resolve_target(42, {"name": "表情"})
+    assert isinstance(out, str) and out.startswith("ERROR: no_target")
+    assert "Labels you set here: 发送" in out
+
+
+def test_a_real_control_outranks_a_label(monkeypatch):
+    """A labelled shape must not shadow a control that a11y actually names."""
+    real = _cand(3, "发送", "Button", (1000, 500, 1060, 530), ("Invoke",))
+    monkeypatch.setattr(
+        screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [(real, object())]
+    )
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 500, 1400, 800))
+    screen._session.labels = {"发送": _cand(0, "发送", "", (1200, 600, 1260, 660), (), "visual")}
+    screen._session.labels_hwnd = 42
+    screen._session.labels_rect = (1000, 500, 1400, 800)
+
+    hit = screen.resolve_target(42, {"name": "发送"})
+    assert isinstance(hit, screen.Target) and hit.cls == "Button"
+
+
+def test_labels_die_with_the_session():
+    screen._session.labels = {"发送": _cand(0, "发送", "", (1, 2, 3, 4), (), "visual")}
+    screen._session.labels_hwnd = 42
+    screen.disarm()
+    assert screen._session.labels == {} and screen._session.labels_hwnd == 0
+
+
+def test_the_numbered_listing_uses_the_label_again(monkeypatch):
+    """Numbers are per-listing; the label is what survives one."""
+    shape = _cand(8, "", "", (1305, 261, 1461, 416), (), "visual")
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [])
+    monkeypatch.setattr(screen, "_ocr_targets", lambda *a, **k: [])
+    monkeypatch.setattr(screen, "_visual_targets", lambda *a, **k: [shape])
+    monkeypatch.setattr(screen, "_u32", _U32(client=(852, 131, 2178, 1373)))
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(
+        screen, "grab_window", lambda hwnd: _frame((1400, 1200), (255, 255, 255), (852, 131))
+    )
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "微信")
+    monkeypatch.setattr(
+        screen,
+        "window_rect",
+        lambda hwnd: (842, 101, 2188, 1383),
+    )
+    screen._session.labels = {"发送": _cand(0, "发送", "", (1305, 261, 1461, 416), (), "visual")}
+    screen._session.labels_hwnd = 42
+    screen._session.labels_rect = (842, 101, 2188, 1383)
+
+    out = str(screen._action_targets({"hwnd": 42}))
+    assert "'发送'" in out and "[shape]" in out
+
+
+# ── three strikes, then a question (spec §35.1) ────────────────────────────
+def test_three_fruitless_attempts_ask_the_user_instead_of_retrying(monkeypatch):
+    asked = []
+
+    def fake_ask(_sink, questions, **_kw):
+        asked.append(questions[0]["question"])
+        return ("answered", "把它拉到前台吧")
+
+    pairs = [(_cand(1, "clicks=0", "Static", (1000, 500, 1100, 520)), object())]
+    monkeypatch.setattr(screen, "blocking_ask", fake_ask)
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: True)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((20, 20)))
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(
+        screen, "_focused", lambda: {"name": "", "cls": "Static", "rect": (0, 0, 0, 0)}
+    )
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "ensure_on_screen", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # our window is on top
+    _listed(42, pairs[0][0])
+
+    results = [
+        str(screen._action_click({"hwnd": 42, "target": 1}, None, None, None, None))
+        for _ in range(3)
+    ]
+    assert results[0].count("unverified") == 1 and results[1].count("unverified") == 1
+    assert results[2].startswith("ESCALATED") and "把它拉到前台吧" in results[2]
+    assert len(asked) == 1 and "连续 3 次没看到效果" in asked[0]
+    assert screen._session.failures == {}  # the counter resets once the user answered
+
+
+def test_type_verifies_by_reading_the_control_back(monkeypatch):
+    """The verification half is unchanged by the route change: the control is read
+    back and the result says what it read, and the tool must not fall over *after*
+    the text already landed (2026-09-13: a leftover attribute made it report an error
+    while the text was already sitting in the chat box)."""
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((200, 100)))
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("你好", "Edit"))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(
+        screen, "type_text", lambda text, delay=0, should_abort=None: (len(text), None)
+    )
+
+    out = str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
+    assert "verified: read back '你好'" in out and "typed: 2/2 characters" in out
+
+
+def test_a_run_that_visibly_worked_is_not_counted_as_a_failed_attempt(monkeypatch):
+    """A self-drawn control exposes no value to read back (spec §40), so the picture
+    moving is the evidence there. Three such runs in a row used to escalate and ask
+    the user — measured 2026-09-14 while typing into Notepad++, where every character
+    had landed and the tool still reported 'failed attempts'."""
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "wake_window", lambda hwnd, via="auto": [])
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("", "the focus"))
+    monkeypatch.setattr(screen, "send_keys", lambda names: (names, None))
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    # The injection itself is never real in a unit test: a gate run must not type
+    # into whatever window happens to be focused on the machine running it.
+    monkeypatch.setattr(
+        screen, "type_text", lambda text, delay=0, should_abort=None: (len(text), None)
+    )
+    monkeypatch.setattr(screen, "blocking_ask", lambda *a, **k: pytest.fail("asked the user"))
+    blank, inked = _frame((200, 100)), _frame((200, 100))
+    ImageDraw.Draw(inked.image).rectangle((10, 10, 120, 60), fill=(0, 0, 0))  # the text landed
+    frames = [blank, inked] * 4
+
+    def fake_grab(hwnd):
+        return frames.pop(0)
+
+    monkeypatch.setattr(screen, "grab_window", fake_grab)
+
+    outs = [
+        str(screen._action_type({"hwnd": 42, "text": "你好"}, None, None, None, None))
+        for _ in range(3)
+    ]
+    assert all("ESCALATED" not in out for out in outs)
+    assert all("the picture changed" in out for out in outs)
+    assert screen._session.failures == {}  # nothing was ever held against the target
+
+
+def test_double_click_reports_the_window_it_opened(monkeypatch):
+    """The open gesture's visible effect is usually a *new* window, not a repaint of
+    the one that was clicked — double-clicking a desktop icon launches an app, and
+    that is the whole point of having the gesture back (user, 2026-09-13)."""
+    pairs = [(_cand(1, "微信", "", (1000, 500, 1100, 520)), object())]
+    before = [
+        screen.Win(42, "桌面", "SysListView32", (0, 0, 2240, 1400), 5, "explorer.exe", "normal")
+    ]
+    after = [
+        *before,
+        screen.Win(777, "记事本", "Notepad", (10, 20, 300, 400), 9, "notepad.exe", "normal"),
+    ]
+    calls: list = []
+    gestures: list = []
+
+    def fake_click(*_a, **kwargs):
+        calls.append(1)  # from the injection on: the new window exists
+        gestures.append(kwargs.get("clicks"))
+        return True
+
+    def fake_windows(include_hidden=False):
+        return after if calls else before
+
+    monkeypatch.setattr(screen, "list_windows", fake_windows)
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "click_at", fake_click)
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((20, 20)))
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "covering_window", lambda point: 42)  # the desktop is on top
+    monkeypatch.setattr(screen, "_focused", lambda: {"name": "", "cls": "Static", "rect": (0,) * 4})
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (900, 400, 1200, 600))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "记事本" if hwnd == 777 else "桌面")
+    _listed(42, pairs[0][0])
+
+    out = str(screen._action_double_click({"hwnd": 42, "target": 1}, None, None, None, None))
+    assert gestures == [2]  # two press/release pairs reach the mouse, not one
+    assert out.startswith("DOUBLE_CLICK") and "opened '记事本'" in out and "verified" in out
+
+
+# ── the gate: the tool does not exist until the user turns it on ───────────
+def test_the_tool_refuses_everything_until_pc_control_is_on():
+    out = screen._run(Config(), None, {"action": "windows"})
+    assert out.startswith("ERROR: screen control is off")
+
+
+def test_an_unknown_action_says_what_is_available():
+    cfg = Config()
+    cfg.pc_control = True
+    out = screen._run(cfg, None, {"action": "teleport"})
+    assert "unknown action" in out and "restore" in out
+
+
+def test_every_input_action_insists_on_a_window_id():
+    cfg = Config()
+    cfg.pc_control = True
+    for action in ("click", "double_click", "drag", "type", "key", "scroll", "restore"):
+        out = screen._run(cfg, None, {"action": action})
+        assert "needs hwnd" in out, action
+
+
+def test_the_tool_offers_the_actions_the_spec_promises():
+    actions = screen.SCHEMA["function"]["parameters"]["properties"]["action"]["enum"]
+    assert set(actions) == {
+        "windows",
+        "shot",
+        "targets",
+        "label",
+        "click",
+        "double_click",
+        "drag",
+        "type",
+        "key",
+        "scroll",
+        "restore",
+    }
+    assert "target" in screen.SCHEMA["function"]["parameters"]["properties"]
+    # no coordinates in the schema: the pixel is never the model's to choose
+    assert "x" not in screen.SCHEMA["function"]["parameters"]["properties"]
+    # a drag's second end is a relative shift of an anchor the program read, plus the
+    # window that anchor lives in — never a position either
+    props = screen.SCHEMA["function"]["parameters"]["properties"]
+    assert {"to_hwnd", "to_target", "to_name", "dx", "dy", "from"} <= set(props)
+    assert "y" not in props
+
+
+# ── drag: a press, a path, a drop (spec §46; user 2026-09-17) ──────────────
+
+
+class _Recorder:
+    """What a gesture injected, in order — mouse and keyboard on one timeline, so that
+    "the Escape came before the release" is something a test can assert."""
+
+    def __init__(self):
+        self.timeline: list[str] = []
+        self.events: list[tuple[int, int, int]] = []
+        self.keys: list[tuple[int, bool]] = []
+        self.pointer = (0, 0)
+
+    def mouse(self, x, y, flags):
+        if flags & screen.MOUSEEVENTF_LEFTDOWN:
+            self.timeline.append("press")
+        elif flags & screen.MOUSEEVENTF_LEFTUP:
+            self.timeline.append("release")
+        else:
+            self.timeline.append("move")
+        self.events.append((x, y, flags))
+        if flags & screen.MOUSEEVENTF_MOVE:
+            self.pointer = (x, y)
+        return 1
+
+    def key(self, vk, *, down):
+        self.keys.append((vk, down))
+        if down:
+            self.timeline.append("escape" if vk == 0x1B else f"key{vk}")
+        return 1
+
+
+def _drag_stub(monkeypatch):
+    """Drive a gesture with no mouse and no screen: the recorded events are readable pixels
+    (`_norm_point` becomes the identity), the pointer follows the moves it is given — the
+    gesture checks its own arrival, so it has to — and the button state is the book's own."""
+    rec = _Recorder()
+    monkeypatch.setattr(screen, "_mouse_event", rec.mouse)
+    monkeypatch.setattr(screen, "_norm_point", lambda x, y: (x, y))
+    monkeypatch.setattr(screen, "cursor_pos", lambda: rec.pointer)
+    monkeypatch.setattr(screen, "_button_is_down", lambda button: button in screen._held_buttons)
+    monkeypatch.setattr(screen, "_key_event", rec.key)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+    return rec
+
+
+def _desktop_stub(monkeypatch, rect_of, owner_of):
+    """The platform half of `_action_drag`: readable windows, a screen to crop, a live a11y
+    tree that offers exactly what was listed, and nothing that could touch a real desktop."""
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "capture_problem", lambda hwnd: None)
+    monkeypatch.setattr(screen, "window_rect", rect_of)
+    monkeypatch.setattr(screen, "covering_window", owner_of)
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_is_shell_surface", lambda hwnd: False)
+    monkeypatch.setattr(screen, "grab_screen", lambda: _frame((2240, 1400), origin=(0, 0)))
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame((400, 300), origin=(0, 0)))
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: f"w{hwnd}")
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Win")
+    monkeypatch.setattr(screen, "_read_back", lambda hwnd, target: ("", ""))
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("", ""))
+    # Resolving a number re-matches it against the live tree, so the tree has to have it.
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (cand, object())
+            for cand in screen._session.listings.get(hwnd, screen.Listing()).candidates.values()
+        ],
+    )
+
+
+def test_a_drag_presses_at_the_grab_point_walks_a_path_and_releases_at_the_drop_point(
+    monkeypatch,
+):
+    """The order is the gesture: press where the thing is, carry it with the button down (a
+    teleport would give the application a single move, which is not a drag — spec §36's
+    reason for the glide, applied to the one gesture whose middle the application reads),
+    and let go exactly on the drop point."""
+    rec = _drag_stub(monkeypatch)
+    facts = screen.drag_to((100, 200), (900, 700))
+
+    press = screen.MOVE_STEPS  # the travel to the grab point comes first
+    assert rec.events[press][:2] == (100, 200)
+    assert rec.events[press][2] & screen.MOUSEEVENTF_LEFTDOWN
+    assert rec.timeline.count("press") == 1
+    path = rec.events[press + 1 : -1]
+    assert len(path) == facts["points"] == facts["steps"] >= screen.DRAG_MIN_STEPS
+    assert len({point[:2] for point in path}) > 2  # a path, not one jump
+    assert path[-1][:2] == (900, 700) == rec.events[-1][:2]
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and rec.timeline[-1] == "release"
+    assert facts["started"] and facts["arrived"] and facts["released"]
+    assert facts["stopped"] is None and facts["injected"] == facts["expected"]
+
+
+def test_a_stopped_drag_is_cancelled_with_escape_and_never_leaves_the_button_down(monkeypatch):
+    """A drag is a second of work, so a stop press has to end it — the per-character
+    contract typing has, asked per point here. Abandoning it means Escape *then* release:
+    releasing first would drop the thing wherever the pointer had got to."""
+    rec = _drag_stub(monkeypatch)
+
+    def stop():
+        return rec.timeline.count("move") > screen.MOVE_STEPS + 3
+
+    facts = screen.drag_to((100, 200), (900, 700), should_abort=stop)
+
+    assert facts["started"] and facts["stopped"] and "aborted" in facts["stopped"]
+    assert 0 < facts["points"] < facts["steps"] and not facts["arrived"]
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP
+    assert facts["released"] and screen._held_buttons == set()
+
+
+def test_a_drop_point_that_changed_hands_is_cancelled_instead_of_released(monkeypatch):
+    """During a drag the window *under the pointer* receives the drop, and a path can hand
+    the pointer to another window on hover (the taskbar does exactly that). So the drop
+    point's owner is read once more just before the button comes up: if it is no longer the
+    window that was named, nothing is dropped."""
+    rec = _drag_stub(monkeypatch)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 1200, 900))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 77)
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "任务栏")
+    monkeypatch.setattr(screen, "_class_name", lambda hwnd: "Shell_TrayWnd")
+
+    facts = screen.drag_to(
+        (100, 200), (900, 700), pre_release=lambda: screen.point_problem(42, (900, 700))
+    )
+
+    assert facts["stopped"] and "belongs to" in facts["stopped"] and "任务栏" in facts["stopped"]
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert facts["released"]
+
+
+def test_a_drag_whose_drop_point_is_covered_is_refused_without_pressing_anything(monkeypatch):
+    """The most expensive mistake this gesture could make is letting go somewhere else, so
+    that is checked before the press: a covered drop point means not one event."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(monkeypatch, lambda hwnd: (0, 0, 1200, 900), lambda point: 42)
+    monkeypatch.setattr(screen, "client_rect", lambda hwnd: (0, 0, 1200, 900))
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (100, 200, 300, 240)))
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 77, "dx": 50, "dy": 50}, None, None, None, None
+        )
+    )
+
+    assert out.startswith("ERROR:") and "belongs to" in out and "w42" in out
+    assert rec.events == [] and rec.keys == []
+    assert screen._held_buttons == set()
+
+
+def test_a_button_the_gesture_left_down_is_lifted_by_the_action_safety_net(monkeypatch):
+    """The one fault only a human can clear: a left button that stays down (it drags
+    whatever the pointer crosses for the rest of the session). Every injection path goes
+    through `_run`'s finally, so a gesture that raises after pressing — or returns without
+    lifting — still leaves the machine usable."""
+    rec = _drag_stub(monkeypatch)
+    cfg = Config()
+    cfg.pc_control = True
+    monkeypatch.setattr(screen, "_u32", _U32())
+
+    def boom(*_args, **_kwargs):
+        screen._button_event("left", down=True, at=(10, 10))  # pressed, then died
+        raise RuntimeError("mid-gesture failure")
+
+    # Through the dispatch table, not the module attribute: that is the path `_run` takes.
+    monkeypatch.setitem(screen._INPUT_ACTIONS, "drag", boom)
+
+    with pytest.raises(RuntimeError):
+        screen._run(cfg, None, {"action": "drag", "hwnd": 42})
+
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and screen._held_buttons == set()
+
+
+def test_disarm_lifts_a_button_that_is_still_down(monkeypatch):
+    """Turning the switch off (or leaving the room) has to hand the machine back, and a
+    held button is part of that — §35.2's `release_all_keys` reason, applied to the mouse."""
+    rec = _drag_stub(monkeypatch)
+    screen._button_event("left", down=True, at=(10, 10))
+    assert screen._held_buttons == {"left"}
+
+    screen.disarm()
+
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and screen._held_buttons == set()
+
+
+def test_a_drag_inside_one_window_carries_the_target_by_dx_dy(monkeypatch):
+    """The selection / slider case: one window, one control, and the drop point is that
+    control's own centre shifted by a relative dx/dy — the model still never gives a screen
+    position, and no second window is needed."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(monkeypatch, lambda hwnd: (0, 0, 2000, 1200), lambda point: 42)
+    _listed(42, _cand(1, "文本编辑器", "Edit", (1000, 500, 1100, 540), ("Value",)))
+
+    out = str(
+        screen._action_drag({"hwnd": 42, "target": 1, "dx": 200, "dy": 40}, None, None, None, None)
+    )
+
+    assert rec.events[screen.MOVE_STEPS][:2] == (1050, 520)  # the press, on the control
+    assert rec.events[-1][:2] == (1250, 560)  # the drop, 200 right and 40 down
+    assert out.startswith("DRAG") and "shifted by (+200,+40)" in out
+
+
+def test_a_drag_carries_between_two_windows_listed_at_the_same_time(monkeypatch):
+    """Why a session keeps one listing per window: the grab end and the drop end live in
+    different windows (a file row into a chat window's input box), so both sets of numbers
+    have to be alive at once — a single remembered listing would throw the first away."""
+    rec = _drag_stub(monkeypatch)
+    source = _cand(5, "报告.pdf", "ListItem", (1000, 600, 1300, 640))
+    dest = _cand(3, "输入框", "Edit", (1700, 800, 2000, 860), ("Value",))
+    _listed(42, source)
+    _listed(77, dest)
+    _desktop_stub(
+        monkeypatch,
+        lambda hwnd: {42: (900, 500, 1400, 900), 77: (1500, 700, 2100, 1000)}[hwnd],
+        lambda point: 42 if point[0] < 1500 else 77,
+    )
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 5, "to_hwnd": 77, "to_target": 3}, None, None, None, None
+        )
+    )
+
+    assert rec.events[screen.MOVE_STEPS][:2] == (1150, 620) == source.center
+    assert rec.events[-1][:2] == (1850, 830) == dest.center
+    assert out.startswith("DRAG") and "报告.pdf" in out and "输入框" in out
+
+
+def test_a_title_bar_drag_reports_the_window_it_moved(monkeypatch):
+    """Repositioning a window needs no target: the OS says where the window is and how tall
+    a caption is, so the grab point is a rectangle the program read. The window's own
+    rectangle is what verifies it — pixels only say that something changed."""
+    rec = _drag_stub(monkeypatch)
+    moved = {"now": False}
+
+    def rect_of(hwnd):
+        return (500, 260, 1300, 960) if moved["now"] else (300, 200, 1100, 900)
+
+    def owner_of(point):
+        moved["now"] = point == (900, 275)  # the drop point the drag is aimed at
+        return 42
+
+    _desktop_stub(monkeypatch, rect_of, owner_of)
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "from": "titlebar", "dx": 200, "dy": 60}, None, None, None, None
+        )
+    )
+
+    assert rec.events[screen.MOVE_STEPS][:2] == (700, 215)  # the middle of the 30px caption
+    assert rec.events[-1][:2] == (900, 275)
+    assert "the title bar" in out and "the window moved" in out and "verified" in out
+
+
+def test_a_drop_onto_a_self_drawn_window_is_allowed_where_a_click_would_not_be(monkeypatch):
+    """WeChat 4.x exposes one pattern-less element over its whole client area. Clicking its
+    centre is refused as "the whole window surface, not a control" — but a *drop* there is
+    the normal case (a chat window takes a file anywhere), so only the two measured point
+    rules apply: inside the named window, and that window owns the point."""
+    surface = _cand(1, "MMUIRenderSubWindowHW", "", (0, 0, 1200, 800), ())
+    _listed(77, surface)
+    monkeypatch.setattr(
+        screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: [(surface, object())]
+    )
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (0, 0, 1200, 860))
+    monkeypatch.setattr(screen, "client_rect", lambda hwnd: (0, 0, 1200, 800))
+    monkeypatch.setattr(screen, "covering_window", lambda point: 77)
+
+    assert screen.target_problem(77, surface) is not None  # a click there would be a guess
+    drop = screen.resolve_drop(77, {"to_target": 1}, (10, 10), carry=False)
+    assert isinstance(drop, tuple) and drop[0] == (600, 400) and drop[2] is surface
+    assert screen.point_problem(77, drop[0]) is None
+
+
+# ── the route out of a covered window (user, 2026-09-17) ──────────────────
+
+
+def test_a_route_hovers_the_waypoint_until_the_drop_point_comes_within_reach(monkeypatch):
+    """The user's own way past a window that fills the screen: carry the thing onto the
+    destination's taskbar button and hold — the shell brings that window to the front — and
+    only then carry it in. The drop point is read *after* the wait, because a window that
+    came forward may have been restored or moved on the way."""
+    rec = _drag_stub(monkeypatch)
+    polls = {"n": 0}
+
+    def wait():
+        polls["n"] += 1
+        return polls["n"] >= 3  # the window comes forward on the third read
+
+    refreshed = (900, 700)
+    stale = (1700, 1500)
+    facts = screen.drag_to(
+        (100, 200), stale, via=(1600, 1350), wait=wait, refresh=lambda: refreshed, wait_s=5.0
+    )
+
+    assert facts["started"] and facts["stopped"] is None and polls["n"] == 3
+    assert facts["arrived"] and facts["released"]
+    assert rec.events[-1][:2] == refreshed  # released at the point read after the wait
+    assert stale not in [point[:2] for point in rec.events]  # never went to the stale point
+    assert (1600, 1350) in [point[:2] for point in rec.events]  # it did hover the waypoint
+    assert facts["injected"] == facts["expected"]
+
+
+def test_a_route_that_never_comes_forward_is_cancelled_with_escape(monkeypatch):
+    """If the window never comes forward the drag must not hang over the button, and the
+    thing must not be let go onto it: Escape first (the shell gives the item back), then the
+    release — and the report says the drop point never came within reach."""
+    rec = _drag_stub(monkeypatch)
+
+    facts = screen.drag_to((100, 200), (900, 700), via=(1600, 1350), wait=lambda: False, wait_s=0.0)
+
+    assert facts["stopped"] and "never came within reach" in facts["stopped"]
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert rec.events[-1][2] & screen.MOUSEEVENTF_LEFTUP and screen._held_buttons == set()
+    assert rec.events[-1][:2] != (900, 700)  # never released at the drop point
+
+
+def test_a_route_needs_a_taskbar_button_and_says_so_when_there_is_none(monkeypatch):
+    """A tray-only application has no button to hover, and a flyout cannot be clicked open
+    while a drag holds the button down — so the route is refused before anything is injected,
+    with the reason, rather than hovering something that can never work."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(monkeypatch, lambda hwnd: (0, 0, 1200, 900), lambda point: 42)
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (100, 200, 300, 240)))
+    monkeypatch.setattr(screen, "via_entry", lambda win: "it lives only in the notification area")
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(
+                42, "微信", "Qt51514QWindowIcon", (0, 0, 1200, 900), 7, "WeChat.exe", "normal"
+            )
+        ],
+    )
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 42, "route": "taskbar", "dx": 10, "dy": 10},
+            None,
+            None,
+            None,
+            None,
+        )
+    )
+
+    assert out.startswith("ERROR: the drag cannot go through the taskbar")
+    assert "notification area" in out
+    assert rec.events == [] and screen._held_buttons == set()
+
+
+def test_a_route_takes_the_taskbar_button_and_never_the_notification_area(monkeypatch):
+    """`via_entry` is the 触手可及 resolution (spec §35.15) narrowed to what a *hover* can use:
+    a taskbar button raises its window, a tray icon would have to be clicked."""
+    button = screen.Target(
+        2, "微信 - 1 个运行窗口", "Taskbar.TaskListButtonAutomationPeer", (10, 0, 60, 40)
+    )
+    icon = screen.Target(
+        3, " 微信: 3754901636", "SystemTray.NotificationAreaButton", (1700, 0, 1750, 40)
+    )
+    win = screen.Win(42, "微信", "Qt51514QWindowIcon", (0, 0, 1200, 900), 7, "WeChat.exe", "normal")
+    monkeypatch.setattr(screen, "_u32", _U32())
+
+    monkeypatch.setattr(screen, "_surface_rows", lambda surface: [button, icon])
+    entry = screen.via_entry(win)
+    assert entry.where == "任务栏按钮" and entry.target is button and entry.surface == 555
+
+    monkeypatch.setattr(screen, "_surface_rows", lambda surface: [icon])
+    refused = screen.via_entry(win)
+    assert isinstance(refused, str) and "notification area" in refused
+
+
+def _entry():
+    """The taskbar button row this box always has, as `via_entry` would resolve it."""
+    return screen.Entry(
+        555,
+        _cand(
+            9,
+            "DragProbe - 1 个运行窗口",
+            "Taskbar.TaskListButtonAutomationPeer",
+            (1160, 1345, 1215, 1385),
+        ),
+        "任务栏按钮",
+        1,
+        "DragProbe - 1 个运行窗口",
+    )
+
+
+def test_a_route_never_releases_on_a_place_a_minimized_window_only_pretends_to_be(monkeypatch):
+    """Measured 2026-09-17, and it cost a run: a minimized window reports a 0x0 client rect and
+    an icon-slot window rect, and `WindowFromPoint` at that icon slot *does* answer with the
+    window — so geometry alone says the drop point is fine while there is nothing on screen. The
+    wait asks the window's state first, and without that the file was released onto the icon
+    slot (the pointer got clamped into the screen corner and the drag was cancelled)."""
+    rec = _drag_stub(monkeypatch)
+    _desktop_stub(
+        monkeypatch,
+        lambda hwnd: (0, 0, 1200, 900) if hwnd == 42 else (-48000, -48000, -47644, -47941),
+        lambda point: 42,
+    )
+    monkeypatch.setattr(screen, "client_rect", lambda hwnd: (-48000, -48000, -48000, -48000))
+    monkeypatch.setattr(
+        screen, "window_state", lambda hwnd: "minimized" if hwnd == 77 else "normal"
+    )
+    monkeypatch.setattr(screen, "point_problem", lambda hwnd, point: None)  # the false positive
+    monkeypatch.setattr(screen, "DRAG_VIA_WAIT_S", 0.0)
+    monkeypatch.setattr(screen, "via_entry", lambda win: _entry())
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(77, "DragProbe", "Cls", (0, 0, 1200, 900), 7, "python.exe", "normal")
+        ],
+    )
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (100, 200, 300, 240)))
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 77, "route": "taskbar"}, None, None, None, None
+        )
+    )
+
+    assert "never came within reach" in out and "cancelled" in out
+    assert rec.events[-1][:2] != (-48000, -48000)  # never released at the icon slot
+    assert rec.timeline.index("escape") < rec.timeline.index("release")
+    assert screen._held_buttons == set()
+
+
+def test_a_route_reads_the_drop_point_again_once_the_window_is_back(monkeypatch):
+    """The drop point is a *place*, and a window the shell brought back from the taskbar may
+    have been restored: the release happens at the client centre it has now, not at the one it
+    had while minimized."""
+    rec = _drag_stub(monkeypatch)
+    waypoint = screen.Entry(
+        555,
+        _cand(
+            9,
+            "DragProbe - 1 个运行窗口",
+            "Taskbar.TaskListButtonAutomationPeer",
+            (1160, 1345, 1215, 1385),
+        ),
+        "任务栏按钮",
+        1,
+        "DragProbe - 1 个运行窗口",
+    ).target.center  # what the hover is aimed at, taken from the row itself
+    state = {"back": False}
+
+    def back() -> bool:
+        """The window stays forward once the shell has brought it forward — which is what the
+        hover is aimed at, and it does not go back when the pointer leaves the button."""
+        if rec.pointer == waypoint:
+            state["back"] = True
+        return state["back"]
+
+    def rect_of(hwnd):
+        if hwnd == 42:
+            return (900, 500, 1400, 900)
+        if hwnd == 555:  # the taskbar strip the button lives in
+            return (0, 1330, 2240, 1400)
+        return (1151, 41, 2242, 1331) if back() else (-48000, -48000, -47644, -47941)
+
+    def owner_of(point):
+        if point[1] > 1330:
+            return 555
+        return 42 if point[0] < 1300 else 77
+
+    _desktop_stub(monkeypatch, rect_of, owner_of)
+    monkeypatch.setattr(
+        screen,
+        "client_rect",
+        lambda hwnd: (1163, 87, 2229, 1318) if back() else (-48000, -48000, -48000, -48000),
+    )
+    monkeypatch.setattr(
+        screen, "window_state", lambda hwnd: "normal" if hwnd == 42 or back() else "minimized"
+    )
+    monkeypatch.setattr(screen, "via_entry", lambda win: _entry())
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(77, "DragProbe", "Cls", (1151, 41, 2242, 1331), 7, "python.exe", "normal")
+        ],
+    )
+    _listed(42, _cand(1, "报告.pdf", "ListItem", (1000, 600, 1300, 640)))
+
+    out = str(
+        screen._action_drag(
+            {"hwnd": 42, "target": 1, "to_hwnd": 77, "route": "taskbar"}, None, None, None, None
+        )
+    )
+
+    assert rec.events[-1][:2] == (1696, 702)  # the client centre the window has *now*
+    assert "came back on screen" in out and "verified" in out
+    assert "-48000" not in out
+
+
+# ── the flyout settles before it is clicked (measured 2026-09-17) ──────────
+def test_the_overflow_flyout_must_stop_growing_before_its_row_is_clicked(monkeypatch):
+    """The island *grows* as it fills, so a row read the moment it appears can point a slot
+    off: measured 2026-09-17, the first click landed on the neighbouring icon and opened that
+    application's panel. The row is therefore only handed back once the flyout's own
+    rectangle and the row's rectangle have been identical on two polls in a row."""
+    arrow = _cand(1, "显示隐藏的图标", "SystemTray.NormalButton", (1829, 1328, 1877, 1400))
+    # The icon row as it reads *while the surface is still filling*, 40px too high…
+    filling = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1143, 2029, 1287))
+    # …and where it ends up once the flyout has stopped moving.
+    settled = _cand(1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1183, 2029, 1327))
+    polls = [((1700, 1140, 2040, 1290), filling), ((1700, 1180, 2040, 1330), settled)]
+    seen = {"rows": 0}
+    state = {"open": False}
+
+    def current():
+        return polls[min(seen["rows"] // 2, 1)]
+
+    def rect_of(hwnd):
+        if hwnd == 31:  # the flyout: its own rectangle grows with its contents
+            return current()[0]
+        return _TASKBAR_BOX if hwnd == 900 else _DESKTOP_BOX
+
+    def _wins(include_hidden=False):
+        box, _row = current()
+        return [
+            screen.Win(
+                31,
+                "",
+                "TopLevelWindowForOverflowXamlIsland",
+                box,
+                5,
+                "explorer.exe",
+                "normal" if state["open"] else "hidden",
+            ),
+            _qq(),
+        ]
+
+    def _row(rows, win):
+        if rows and rows[0] is arrow:
+            return None  # the notification strip itself: the icon is behind the arrow
+        seen["rows"] += 1
+        return current()[1]
+
+    clicked: list[tuple[int, int]] = []
+
+    def _click(x, y, **_kwargs):
+        clicked.append((x, y))
+        state["open"] = True  # the arrow is what opens it
+
+    monkeypatch.setattr(screen, "_u32", _Shell())
+    monkeypatch.setattr(screen, "window_rect", rect_of)
+    monkeypatch.setattr(screen, "list_windows", _wins)
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: (
+            [(arrow, object())] if hwnd == 900 else [(current()[1], object())]
+        ),
+    )
+    monkeypatch.setattr(screen, "_shell_row", _row)
+    monkeypatch.setattr(screen, "click_at", _click)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "hidden")
+    monkeypatch.setattr(screen, "foreground_hwnd", lambda: 77)
+    monkeypatch.setattr(screen, "_await_state", lambda hwnd, want, timeout: True)
+    monkeypatch.setattr(screen.time, "sleep", lambda _s: None)
+
+    assert "clicked its 托盘图标" in screen.shell_wake(1)
+    # Only the arrow, and then the row at the rectangle it had *stopped* at.
+    assert clicked == [arrow.center, settled.center]
+    assert seen["rows"] >= 3, "a row seen once was clicked: that is the misfire this waits out"
+
+
+def test_an_unsettled_flyout_is_still_clicked_rather_than_left_hanging(monkeypatch):
+    """The deadline is a fallback, not a second failure: a surface that never stops moving
+    still yields the last row seen (the caller's retry is what it has), and the flyout is
+    only closed when nothing was found at all."""
+    arrow = _cand(1, "显示隐藏的图标", "SystemTray.NormalButton", (1829, 1328, 1877, 1400))
+    drift = {"n": 0}
+    closed: list[bool] = []
+
+    def rect_of(hwnd):
+        return (1700, 1140 + drift["n"], 2040, 1290 + drift["n"])
+
+    def _row(rows, win):
+        drift["n"] += 1  # this surface never stops moving: it must not settle
+        return _cand(
+            1, " QQ: 3754901636", "SystemTray.NormalButton", (1944, 1143, 2029, 1287 + drift["n"])
+        )
+
+    monkeypatch.setattr(screen, "_u32", _Shell())
+    monkeypatch.setattr(screen, "window_rect", rect_of)
+    monkeypatch.setattr(
+        screen,
+        "list_windows",
+        lambda include_hidden=False: [
+            screen.Win(
+                31,
+                "",
+                "TopLevelWindowForOverflowXamlIsland",
+                rect_of(31),
+                5,
+                "explorer.exe",
+                "normal",
+            ),
+            _qq(),
+        ],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [(_row([], None), object())],
+    )
+    monkeypatch.setattr(screen, "_shell_row", _row)
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: None)
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_close_tray_flyout", lambda: closed.append(True))
+    # A clock that moves but never far: the loop runs a handful of polls and then gives up.
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(screen.time, "monotonic", lambda: 100.0 + next(ticks) * 0.5)
+
+    entry = screen._tray_overflow_entry(_qq(), [arrow])
+    assert entry is not None and entry.where == "托盘图标"  # the last candidate, not a hang
+    assert entry.target.name.strip().startswith("QQ:")  # …the row as it read last
+    assert drift["n"] >= 4, "the surface never settled, so the deadline is what ended this"
+    assert closed == []  # nothing is closed over a row it just handed back
+
+
+# ── a screen that cannot be read, and a desktop that takes no input ─────────
+class _NoDisplay:
+    """PIL's ImageGrab on a locked or disconnected session: the display device hands it
+    nothing and the grab raises instead of returning an empty picture."""
+
+    @staticmethod
+    def grab(**_kwargs):
+        raise OSError("screen grab failed")
+
+
+def test_a_screen_that_cannot_be_read_names_the_machine_not_the_tool(monkeypatch):
+    monkeypatch.setattr(screen, "ImageGrab", _NoDisplay)
+    with pytest.raises(screen.ScreenUnavailable) as caught:
+        screen.grab_screen()
+    assert "could not be captured" in str(caught.value)
+
+    cfg = Config()
+    cfg.pc_control = True
+    out = screen._run(cfg, None, {"action": "shot"})
+    assert isinstance(out, str) and out.startswith("ERROR: the screen could not be captured")
+
+    # When the input desktop itself is the reason, that is what the caller is told: it is
+    # the difference between "lock the screen and come back" and "this box has no display".
+    monkeypatch.setattr(screen, "input_desktop_name", lambda: "Winlogon")
+    locked = screen._run(cfg, None, {"action": "shot"})
+    assert isinstance(locked, str) and "the input desktop is 'Winlogon'" in locked
+
+
+def test_a_machine_taking_no_input_refuses_to_inject_but_still_reports(monkeypatch):
+    """With the session locked the input desktop is not this one: nothing can be injected
+    into it, while windows/targets still describe what is on screen. The tool owes the
+    caller the machine's state — not "the tool is broken"."""
+    cfg = Config()
+    cfg.pc_control = True
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "input_desktop_name", lambda: "Screen-saver")
+    monkeypatch.setitem(screen._INPUT_ACTIONS, "click", lambda *a, **k: pytest.fail("injected"))
+
+    out = screen._run(cfg, None, {"action": "click", "hwnd": 42, "target": 1})
+    assert isinstance(out, str) and out.startswith("ERROR:")
+    assert "'Screen-saver'" in out and "nothing was sent" in out
+
+    # The read-only half is untouched: the listing is how the caller sees what is there.
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 500, 1400, 800))
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame())
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "保存", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())
+        ],
+    )
+    listing = screen._run(cfg, None, {"action": "targets", "hwnd": 42})
+    assert str(listing).startswith("TARGETS in hwnd=0x2A")
+
+
+def test_a_stub_user32_is_cannot_tell_not_locked(monkeypatch):
+    """`input_desktop_name` has to survive a user32 without the call: "cannot tell" must
+    not read as "locked", or every test (and any older Windows) would refuse to work."""
+    monkeypatch.setattr(screen, "_u32", _U32())  # the tests' stub has no OpenInputDesktop
+    assert screen.input_desktop_name() == ""
+    assert screen.desktop_problem() is None
+
+
+# ── intent=: a local decider picks the number ─────────────────────────────
+def _decider_env(monkeypatch, tmp_path, config: dict | None = None):
+    """Point the seam at a decider: config.json's `decider` block (spec §63.1).
+
+    The path lands in tmp_path, so neither the tool nor a settings page in the same
+    test can reach this machine's real config. FUNGI_DECIDER is cleared here — the
+    two env cases set it themselves, after this helper has written the file.
+    """
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.delenv("FUNGI_DECIDER", raising=False)
+    target = config_mod.CONFIG_PATH
+    if config is None:
+        target.write_text("{}", encoding="utf-8")
+    else:
+        target.write_text(json.dumps({"decider": config}), encoding="utf-8")
+    monkeypatch.setattr(screen, "_decider_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(screen, "window_rect", lambda hwnd: (1000, 480, 1200, 600))
+    monkeypatch.setattr(screen, "grab_window", lambda hwnd: _frame())
+
+
+def test_intent_without_a_decider_is_refused_with_the_reason(monkeypatch, tmp_path):
+    """A seam that only helps must fail open and say why: with nothing configured the
+    caller gets the reason instead of a number nobody chose."""
+    _decider_env(monkeypatch, tmp_path)
+    _listed(42, _cand(1, "取消", "Button", (1000, 500, 1060, 530)))
+
+    out = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("ERROR:")
+    assert "no decider is configured" in out and "FUNGI_DECIDER" in out
+
+
+def test_a_configured_decider_names_the_number(monkeypatch, tmp_path):
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    cancel = _cand(1, "取消", "Button", (1000, 500, 1060, 530))
+    send = _cand(2, "发送", "Button", (1000, 540, 1120, 570))
+    _listed(42, cancel, send)
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 2, "p": 0.93, "confidence": 0.91},
+    )
+
+    picked = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(picked, screen.Target) and picked is send
+    # The result has to say a decider chose it — otherwise the model cannot tell a number
+    # the program matched from one a model picked.
+    assert "via decider p=0.93 conf=0.91" in picked.label
+    assert cancel.via == ""
+
+
+def test_an_undecided_decider_hands_the_question_back(monkeypatch, tmp_path):
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    cancel = _cand(1, "取消", "Button", (1000, 500, 1060, 530))
+    send = _cand(2, "发送", "Button", (1000, 540, 1120, 570))
+    _listed(42, cancel, send)
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {
+            "decision": "UNDECIDED",
+            "id": 2,
+            "p": 0.41,
+            "threshold": 0.8,
+            "options": [{"id": 2, "label": "发送", "p": 0.41}],
+        },
+    )
+
+    out = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("UNDECIDED:")
+    assert "p=0.410" in out and "0.8" in out
+    assert "pass target=<n>" in out and "#2 发送" in out
+    assert not isinstance(out, screen.Target) and cancel.via == "" and send.via == ""
+
+
+def test_a_decider_is_asked_only_when_the_caller_says_what_the_gesture_is_for(monkeypatch):
+    """With several controls answering to a name and no `intent=`, the old answer stands:
+    the ambiguity is listed for the caller to pick from. Nothing consults a machine the
+    caller never pointed at."""
+    pairs = [
+        (_cand(1, "项目 01", "", (1000, 500, 1100, 520)), object()),
+        (_cand(2, "项目 02", "", (1000, 520, 1100, 540)), object()),
+    ]
+    monkeypatch.setattr(screen, "_scan", lambda hwnd, limit=screen.MAX_CANDIDATES: pairs)
+    monkeypatch.setattr(screen, "_ocr_targets", lambda *a, **k: [])
+    monkeypatch.setattr(screen, "_decider_pick", lambda *a, **k: pytest.fail("asked a decider"))
+
+    out = screen.resolve_target(42, {"name": "项目"})
+    assert isinstance(out, str) and out.startswith("ERROR: 2 controls match")
+    assert "pick a number with target=" in out
+
+
+def test_an_ambiguous_name_with_an_intent_is_handed_to_the_decider(monkeypatch, tmp_path):
+    """This is what a name cannot do on its own: several controls answer to it, and taking
+    the first is the guess this tool does not make."""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    first = _cand(1, "项目 01", "", (1000, 500, 1100, 520))
+    second = _cand(2, "项目 02", "", (1000, 520, 1100, 540))
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [(first, object()), (second, object())],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 2, "p": 0.88, "confidence": 0.8},
+    )
+
+    picked = screen.resolve_target(42, {"name": "项目", "intent": "第二个项目"})
+    assert isinstance(picked, screen.Target) and picked is second
+    assert "via decider" in picked.label
+
+    # …and a decider that declines leaves the ambiguity standing, with the list attached.
+    third = _cand(3, "项目 01", "", (1000, 500, 1100, 520))
+    fourth = _cand(4, "项目 02", "", (1000, 520, 1100, 540))
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [(third, object()), (fourth, object())],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "UNDECIDED", "id": 1, "p": 0.2, "threshold": 0.8},
+    )
+    out = screen.resolve_target(42, {"name": "项目", "intent": "第二个项目"})
+    assert isinstance(out, str) and out.startswith("UNDECIDED:")
+    assert "It had to choose among these" in out and "#4 [text] '项目 02'" in out
+    assert third.via == "" and fourth.via == ""
+
+
+def test_intent_builds_the_listing_when_the_window_has_never_been_listed(monkeypatch, tmp_path):
+    """Fungi keeps listings in memory (there is no on-disk one to reload), so `intent=` has
+    to be able to cut the candidates itself — and to report the listing's own failure."""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "发送", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 1, "p": 0.9, "confidence": 0.9},
+    )
+
+    picked = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(picked, screen.Target) and picked.name == "发送"
+    assert 42 in screen._session.listings  # the listing it had to build is kept for the caller
+
+    # A window that cannot be listed comes back as that error, not as a decider request.
+    screen._session.listings.pop(42)
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "minimized")
+    out = screen.resolve_target(42, {"intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("ERROR:") and "is minimized" in out
+
+
+def test_intent_is_offered_by_the_schema_and_gated_by_the_switch():
+    """`intent` is still desktop control: it lives behind the same pc_control switch, and
+    the model is told it exists (both in the property and in the tool description)."""
+    params = screen.SCHEMA["function"]["parameters"]["properties"]
+    assert "intent" in params
+    # The model is told where *a person* points one: the settings row, the file, the env.
+    described = params["intent"]["description"]
+    assert "Bixian" in described and "config.json" in described
+    assert "FUNGI_DECIDER" in described
+    description = screen.SCHEMA["function"]["description"]
+    assert "intent=" in description and "input desktop" in description
+
+    out = screen._run(Config(), None, {"action": "click", "hwnd": 42, "intent": "发送"})
+    assert isinstance(out, str) and out.startswith("ERROR: screen control is off")
+
+
+def test_intent_travels_from_the_tool_call_to_the_decider_and_injects_nothing(
+    monkeypatch, tmp_path
+):
+    """The whole seam, through the real entry point: the argument reaches the resolver
+    (nothing in the dispatch needs to know about it), the decider is asked, and a refusal
+    comes back as the answer instead of a click."""
+    cfg = Config()
+    cfg.pc_control = True
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setattr(screen, "_u32", _U32())
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+    monkeypatch.setattr(screen, "_window_text", lambda hwnd: "demo")
+    monkeypatch.setattr(
+        screen,
+        "_scan",
+        lambda hwnd, limit=screen.MAX_CANDIDATES: [
+            (_cand(1, "发送", "Button", (1000, 500, 1060, 530), ("Invoke",)), object())
+        ],
+    )
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "UNDECIDED", "id": 1, "p": 0.1, "threshold": 0.8},
+    )
+    monkeypatch.setattr(screen, "click_at", lambda *a, **k: pytest.fail("injected a click"))
+
+    out = screen._run(cfg, None, {"action": "click", "hwnd": 42, "intent": "发送这条消息"})
+    assert isinstance(out, str) and out.startswith("UNDECIDED:")
+
+
+def test_typing_by_intent_still_looks_for_a_control(monkeypatch, tmp_path):
+    """`type` resolves a target only when one was asked for — a bare `intent=` counts as
+    asking (the same rule the number and the name follow)."""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    box = _cand(1, "", "Edit", (1000, 500, 1100, 530), ("Value",))
+    _listed(42, box)
+    monkeypatch.setattr(
+        screen,
+        "_decider_ask",
+        lambda cfg, request: {"decision": "YES", "id": 1, "p": 0.9, "confidence": 0.9},
+    )
+    resolved: list[object] = []
+    monkeypatch.setattr(
+        screen, "resolve_target", lambda hwnd, args, **k: resolved.append(args) or box
+    )
+    monkeypatch.setattr(screen, "_guarded_input", lambda hwnd: (True, ""))
+    monkeypatch.setattr(screen, "set_foreground", lambda hwnd: True)
+    monkeypatch.setattr(screen, "_focus_target", lambda hwnd, target: True)
+    monkeypatch.setattr(screen, "_read_back_settled", lambda hwnd, target: ("", "the box"))
+    monkeypatch.setattr(screen, "type_text", lambda text, **k: (len(text), None))
+    monkeypatch.setattr(screen, "window_state", lambda hwnd: "normal")
+
+    out = screen._action_type(
+        {"hwnd": 42, "text": "hi", "intent": "the message box"}, None, None, None, None
+    )
+    assert resolved and resolved[0]["intent"] == "the message box"
+    assert "TYPE 2 chars" in str(out)
+
+
+# ── the settings entry: config.json's `decider` block, and the status it shows ──
+def test_the_seam_reads_the_decider_block_from_config_json(monkeypatch, tmp_path):
+    """配置入口在 config.json 的 decider 段（spec §63.1）：设置页写的和工具读的是同一个对象。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111", "k": 5})
+
+    cfg = screen._decider_config()
+
+    assert cfg["url"] == "http://127.0.0.1:8111" and cfg["k"] == 5
+    assert cfg["_source"] == str(config_mod.CONFIG_PATH), "报告里要说出这份配置在哪"
+
+
+def test_the_env_override_points_the_seam_elsewhere_for_one_run(monkeypatch, tmp_path):
+    """FUNGI_DECIDER 压过配置文件：这次先拿另一个服务试，盘里那份一个字节不动。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setenv("FUNGI_DECIDER", json.dumps({"url": "http://127.0.0.1:9999"}))
+
+    cfg = screen._decider_config()
+
+    assert cfg["url"] == "http://127.0.0.1:9999"
+    assert cfg["_source"] == "FUNGI_DECIDER"
+
+
+def test_an_env_variable_that_is_not_json_is_a_reason_not_an_exception(monkeypatch, tmp_path):
+    """把 FUNGI_DECIDER 写成裸地址是常事：接缝带着这句话回来，而不是炸掉一次工具调用。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+    monkeypatch.setenv("FUNGI_DECIDER", "http://127.0.0.1:8111")
+
+    cfg = screen._decider_config()
+
+    assert cfg["_problem"].startswith("FUNGI_DECIDER is not valid JSON")
+
+
+def test_nothing_configured_is_a_state_that_never_touches_the_network(monkeypatch, tmp_path):
+    """状态行的第一句（没配）来自配置本身：进设置页不许联网——/health 最坏卡界面 3 秒。"""
+    _decider_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(screen, "_decider_health", lambda *_a, **_k: pytest.fail("没配也联网了"))
+
+    assert screen.decider_status() == {"state": "none"}
+
+
+def test_a_service_that_answers_reports_its_model_back_to_the_page(monkeypatch, tmp_path):
+    """连上了要把模型名带回来：状态行那句 ✓ 的有用部分就是它（阈值归服务自己答）。"""
+    _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111", "serve": ["x.py"]})
+    seen: list[str] = []
+
+    def health(url, timeout=0.0):
+        seen.append(url)
+        return {"loaded": True, "model": "kev-4B", "policy": "bixian@0.9"}
+
+    monkeypatch.setattr(screen, "_decider_health", health)
+
+    status = screen.decider_status()
+
+    assert status == {
+        "state": "ready",
+        "url": "http://127.0.0.1:8111",
+        "serve": True,
+        "model": "kev-4B",
+        "policy": "bixian@0.9",
+    }
+    assert seen == ["http://127.0.0.1:8111"], "问的就是配置里的那个地址"
+
+
+def test_every_way_a_service_can_be_wrong_gets_its_own_state(monkeypatch, tmp_path):
+    """「没在跑」「在加载」「加载炸了」是三句不同的人话、三种处置——不能都叫连不上。"""
+    cases = [
+        (None, "down", "nothing answers there"),
+        ({"loaded": False}, "loading", None),
+        ({"loaded": False, "load_error": "CUDA out of memory"}, "down", "CUDA out of memory"),
+        ({"loaded": True, "model_present": False}, "down", "no weights"),
+    ]
+    for health, state, reason in cases:
+        _decider_env(monkeypatch, tmp_path, {"url": "http://127.0.0.1:8111"})
+        monkeypatch.setattr(screen, "_decider_health", lambda *_a, _h=health, **_k: _h)
+
+        status = screen.decider_status()
+
+        assert status["state"] == state, health
+        if reason:
+            assert reason in status["reason"], health

@@ -21,7 +21,13 @@ def test_planner_needs_template(repo):
 
 def test_planner_derives_privileges_from_template(repo):
     repo.create(
-        {"id": "tpl-worker", "isTemplate": True, "tools": ["shell", "files"], "wip": 3, "model": "m1"},
+        {
+            "id": "tpl-worker",
+            "isTemplate": True,
+            "tools": ["shell", "files"],
+            "wip": 3,
+            "model": "m1",
+        },
         creator="human",
     )
     with pytest.raises(PotError, match="planner_no_privilege"):

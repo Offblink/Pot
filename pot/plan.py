@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 from pot.errors import PotError
-from pot.tools import schema
+from pot.tools.board import schema
 
 _SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 

@@ -134,12 +134,16 @@ class Board:
         ).fetchall()
         for row in rows:
             comments = json.loads(
-                conn.execute(
-                    "SELECT comments FROM cards WHERE id=?", (row["id"],)
-                ).fetchone()["comments"]
+                conn.execute("SELECT comments FROM cards WHERE id=?", (row["id"],)).fetchone()[
+                    "comments"
+                ]
             )
             comments.append(
-                {"by": "system", "text": f"租约到期，自动退回待办（原持有：{row['holder']}）", "at": now}
+                {
+                    "by": "system",
+                    "text": f"租约到期，自动退回待办（原持有：{row['holder']}）",
+                    "at": now,
+                }
             )
             conn.execute(
                 "UPDATE cards SET status='todo', holder=NULL, lease_until=NULL, comments=?,"
@@ -169,9 +173,7 @@ class Board:
             raise PotError("already_held", f"{row['id']} held by {row['holder']}")
 
     @staticmethod
-    def _apply(
-        conn: sqlite3.Connection, card_id: str, sets: dict[str, object], now: int
-    ) -> dict:
+    def _apply(conn: sqlite3.Connection, card_id: str, sets: dict[str, object], now: int) -> dict:
         assignments = ", ".join(f"{col}=?" for col in sets)
         conn.execute(
             f"UPDATE cards SET {assignments}, if_version=if_version+1, updated_at=? WHERE id=?",
@@ -311,9 +313,7 @@ class Board:
                     raise PotError("already_held", f"{card_id} held by {holder}")
                 if row["status"] != "doing":
                     raise PotError("bad_status", row["status"])  # holder re-claim = renew
-                return self._apply(
-                    conn, card_id, {"lease_until": now + self.lease_seconds}, now
-                )
+                return self._apply(conn, card_id, {"lease_until": now + self.lease_seconds}, now)
             if row["status"] != "todo":
                 raise PotError("bad_status", row["status"])
             role = self.roles.get(actor.role_id)
@@ -335,7 +335,11 @@ class Board:
             return self._apply(
                 conn,
                 card_id,
-                {"holder": actor.holder, "status": "doing", "lease_until": now + self.lease_seconds},
+                {
+                    "holder": actor.holder,
+                    "status": "doing",
+                    "lease_until": now + self.lease_seconds,
+                },
                 now,
             )
 
@@ -426,7 +430,11 @@ class Board:
             return self._apply(
                 conn,
                 card_id,
-                {"report": json.dumps(stored, ensure_ascii=False), "status": "review", "lease_until": None},
+                {
+                    "report": json.dumps(stored, ensure_ascii=False),
+                    "status": "review",
+                    "lease_until": None,
+                },
                 now,
             )
 

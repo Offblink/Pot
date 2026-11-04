@@ -68,8 +68,7 @@ SCHEMAS: dict[str, dict] = {
     ),
     "pot_board_claim": schema(
         "pot_board_claim",
-        "Claim a todo card. All seven gates run here; on success you hold it and"
-        " the lease starts.",
+        "Claim a todo card. All seven gates run here; on success you hold it and the lease starts.",
         {"card_id": _ID, "if_version": _VERSION},
         ["card_id", "if_version"],
     ),
@@ -145,9 +144,7 @@ def make_tools(board: Board, actor: Actor) -> dict[str, Callable[..., str]]:
         labels: list[str] | None = None,
         include_deleted: bool = False,
     ) -> str:
-        cards = board.list(
-            status=status, role=role, labels=labels, include_deleted=include_deleted
-        )
+        cards = board.list(status=status, role=role, labels=labels, include_deleted=include_deleted)
         return _ok({"cards": cards})
 
     @_guard

@@ -3,11 +3,14 @@ name = "pot"
 version = "0.1.0"
 description = "Pot — Positive Bots: single-host agent harness with resident roles and a task board"
 requires-python = ">=3.13"
-dependencies = []
+# comtypes drives UI Automation for the screen tool (spec §35): pure Python, and
+# PyInstaller ships a hook for comtypes.client, so the frozen exe keeps working.
+dependencies = ["pillow>=10.0", "comtypes>=1.4"]
 
 [project.optional-dependencies]
-# Dev tooling; CI reads pins from here when CI exists.
-dev = ["pytest", "ruff==0.13.0"]
+# Dev tooling. CI reads these pins from here when CI exists.
+# playwright drives the real-browser WebUI tests (tests/test_webui_*.py).
+dev = ["pytest", "ruff==0.13.0", "playwright==1.61.0"]
 
 [tool.ruff]
 target-version = "py313"

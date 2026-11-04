@@ -1,0 +1,235 @@
+"""Hub HTTP API, loopback-only: poll + sessions (spec §1.2/§10-3).
+
+Token auth on every endpoint. The room-protocol family (join/leave/heartbeat/
+send/fs), the friend/mail routes and the transfer routes are gone with the
+rooms; what stays is the session store family the launcher rides on.
+"""
+
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from .. import runlog
+from .asks import Asks
+from .relay import Relay
+from .roster import Roster
+from .store import Store
+
+MAX_BODY = 5 * 1024 * 1024
+MAX_POLL = 25.0
+# Sweep stale ask records. MUST exceed the longest waiter (the consent card
+# held a clone for ask_timeout_s=1800): a swept record outlives its card,
+# so a late click resolves nothing.
+ASK_TIMEOUT = 1900.0
+REAP_INTERVAL = 5.0
+# Bytes per write on a download, and how often the delivery count is updated:
+# 1 MiB is a page poll's worth of resolution (§49), and a multiple of the sizes
+# a window is cut into (§50).
+
+
+# How long a staging nobody finished is worth disk (§62). How much of a file
+# proves it is the same file lives in landing — one definition, imported above.
+
+
+def _query_int(params: dict, key: str) -> int | None:
+    """A non-negative integer out of a query string, or None when it is not one."""
+    raw = (params.get(key) or [""])[0].strip()
+    return int(raw) if raw.isdigit() else None
+
+
+class Hub:
+    """Room server: roster + relay + asks + store behind one HTTP API."""
+
+    def __init__(
+        self,
+        name: str,
+        token: str,
+        data_root: Path,
+        heartbeat_timeout: float = 30.0,
+        port: int = 0,
+    ):
+        self.name = name
+        self.token = token
+        self._bind_port = port
+        data_root = Path(data_root)
+        self.roster = Roster(heartbeat_timeout)
+        self.relay = Relay(name)
+        self.asks = Asks()
+        self.store = Store(data_root, self.asks)
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self._reaper: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    @property
+    def port(self) -> int:
+        if self._server is None:
+            raise RuntimeError("hub not started")
+        return self._server.server_address[1]
+
+    def start(self) -> None:
+        handler = type("HubHandler", (_Handler,), {"hub": self})
+        self._server = ThreadingHTTPServer(("127.0.0.1", self._bind_port), handler)
+        self._server.daemon_threads = True
+        runlog.note("hub listening on 127.0.0.1:%d as %r", self.port, self.name)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, name="pot-hub", daemon=True
+        )
+        self._thread.start()
+        self._reaper = threading.Thread(target=self._reap_loop, name="pot-reaper", daemon=True)
+        self._reaper.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._server is not None:
+            runlog.note("hub on port %d stopped", self._server.server_address[1])
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def _reap_loop(self) -> None:
+        while not self._stop.wait(REAP_INTERVAL):
+            for name in self.roster.reap():
+                self.relay.drop_host(name)
+            self.asks.sweep(ASK_TIMEOUT)
+
+    # ── operations shared by handler, clones, and tests ──
+
+
+class _Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    hub: Hub = None  # type: ignore[assignment]
+
+    def log_message(self, format: str, *args) -> None:
+        pass  # quiet
+
+    # ── plumbing ──
+
+    def _reply(self, obj: dict, code: int = 200, headers: dict | None = None) -> None:
+        data = json.dumps(obj).encode("utf-8")
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Long-poll replies race client reconnects/disconnects all the
+            # time; a gone reader is routine, not an error worth a traceback.
+            self.close_connection = True
+
+    def _bad_token(self) -> None:
+        """Someone knocked with the wrong token — the host's half of "I cannot join".
+
+        Throttled per caller: a client holding a stale token polls once a second,
+        and the log is worth reading only if this is one line a minute. The route
+        is logged without its query: on a GET the query *is* the token, and this
+        file gets attached to bug reports (the repo is public).
+        """
+        peer = self.client_address[0]
+        runlog.warn_once(
+            f"hub-bad-token:{peer}",
+            "hub: %s used the wrong token on %s — a friend holding an old token?",
+            peer,
+            self.path.split("?", 1)[0],
+        )
+        self._reply({"error": "bad token"}, 403)
+
+    def _body(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_BODY:
+            raise ValueError("body too large")
+        raw = self.rfile.read(length) if length else b"{}"
+        data = json.loads(raw or b"{}")
+        if not isinstance(data, dict):
+            raise ValueError("body must be an object")
+        return data
+
+    # ── routing ──
+
+    def do_POST(self) -> None:
+        try:
+            url = urlparse(self.path)
+            body = self._body()
+            if body.get("token") != self.hub.token:
+                self._bad_token()
+                return
+            path = url.path
+            if path == "/api/save":
+                self._save(body)
+            elif path == "/api/session/delete":
+                self._session_delete(body)
+            else:
+                self._reply({"error": "not found"}, 404)
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._reply({"error": str(exc)}, 400)
+
+    def do_GET(self) -> None:
+        url = urlparse(self.path)
+        params = parse_qs(url.query)
+        token = (params.get("token") or [""])[0]
+        if token != self.hub.token:
+            self._bad_token()
+            return
+        if url.path == "/api/poll":
+            self._poll(params)
+        elif url.path == "/api/sessions":
+            self._reply({"sessions": self.hub.store.sessions.list_sessions()})
+        elif url.path == "/api/session":
+            self._session_load(params)
+        else:
+            self._reply({"error": "not found"}, 404)
+
+    def do_DELETE(self) -> None:
+        # No DELETE routes survived the transfer cut.
+        self._reply({"error": "not found"}, 404)
+
+    # ── room ops ──
+
+    # ── mail ──
+
+    def _poll(self, params: dict) -> None:
+        # Loopback-only (spec §1.2): no roster admission — /api/join is gone and
+        # the token gates the caller. /api/poll must stay alive (§10-3).
+        host = (params.get("host") or [""])[0]
+        after = int((params.get("after") or ["0"])[0])
+        timeout = min(float((params.get("timeout") or ["0"])[0]), MAX_POLL)
+        inbox = self.hub.relay.host_buffer(host)
+        messages, cursor = inbox.after(after, timeout)
+        self._reply({"messages": [e.serialize() for e in messages], "cursor": cursor})
+
+    # ── fs ops ──
+
+    # ── sessions ──
+
+    def _save(self, body: dict) -> None:
+        store = self.hub.store.sessions
+        store.save(
+            str(body.get("id") or ""),
+            str(body.get("title") or ""),
+            body.get("messages") or [],
+            body.get("subagents"),
+            body.get("asks"),
+        )
+        self._reply({"ok": True})
+
+    def _session_load(self, params: dict) -> None:
+        sid = (params.get("id") or [""])[0]
+        data = self.hub.store.sessions.load(sid)
+        if data is None:
+            self._reply({"error": "not found"}, 404)
+            return
+        self._reply(data)
+
+    def _session_delete(self, body: dict) -> None:
+        self.hub.store.sessions.delete(str(body.get("id") or ""))
+        self._reply({"ok": True})
+
+    # ── transfers ──
