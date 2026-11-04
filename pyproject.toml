@@ -47,6 +47,9 @@ ignore = [
 testpaths = ["tests"]
 
 [tool.ruff.lint.per-file-ignores]
+# spec §3.1's JSON contract field names are camelCase by decree (canCreateCard,
+# createdBy, isTemplate) — the dataclass mirrors the file format 1:1.
+"pot/roles.py" = ["N815"]
 # Tests: deferred imports of optional deps, unused fixture args, class-level
 # lookup tables — deliberate test idioms (same口径 as Fungi).
 "tests/**" = ["PLC0415", "ARG001", "ARG002", "ARG005", "RUF012"]
