@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# runtime state — user-editable, never committed
+data/
+sessions/
+logs/
+config.json

@@ -1,0 +1,52 @@
+[project]
+name = "pot"
+version = "0.1.0"
+description = "Pot — Positive Bots: single-host agent harness with resident roles and a task board"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+# Dev tooling; CI reads pins from here when CI exists.
+dev = ["pytest", "ruff==0.13.0"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = ["sessions", "data"]  # runtime state, never linted
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+    "PL",  # pylint
+    "ARG", # unused arguments
+    "PTH", # use pathlib
+    "RET", # return simplification
+]
+ignore = [
+    "E501",    # line length (ruff format already keeps code wrapped)
+    "PLR0911", # too many return statements (tool dispatch)
+    "PLR0912", # too many branches (server/tool dispatch)
+    "PLR0913", # too many arguments (tool signatures)
+    "PLR0915", # too many statements (ported handlers)
+    "PLR2004", # magic values (protocol constants)
+    "SIM108",  # ternary instead of if/else (readability)
+    # Chinese prose in comments/docstrings is the house language here.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: deferred imports of optional deps, unused fixture args, class-level
+# lookup tables — deliberate test idioms (same口径 as Fungi).
+"tests/**" = ["PLC0415", "ARG001", "ARG002", "ARG005", "RUF012"]
