@@ -1,7 +1,7 @@
-/* Fungi web UI */
+/* Pot web UI */
 marked.setOptions({ breaks: true, gfm: true });
-const FC = window.FungiCommon;
-const T = window.FungiI18N.t;
+const FC = window.PotCommon;
+const T = window.PotI18N.t;
 const msgs = document.getElementById('messages'), input = document.getElementById('input'),
   btn = document.getElementById('send'), status = document.getElementById('status'),
   tray = document.getElementById('agent-tray');
@@ -12,7 +12,7 @@ let sessionHidden = false; // the open session's records are toggled hidden (car
 
 function setCurrentSession(id) {
   currentSessionId = id;
-  try { if (id) localStorage.setItem('fungi-session', id); else localStorage.removeItem('fungi-session'); } catch (e) {}
+  try { if (id) localStorage.setItem('pot-session', id); else localStorage.removeItem('pot-session'); } catch (e) {}
   refreshSendButton(); // send vs retry depends on the session (shuttle always sends)
   startJobsPoll(); // jobs 芯片: one interval per open session, torn down on close/switch
 }
@@ -179,7 +179,7 @@ function renderMessages(s) {
    right-edge sidebar (Spore drawer pattern), never in the transcript. A flip to
    done strikes the item through with a growing bar (style.css), so a fresh
    paint (all-done items) shows them struck and a live flip animates. Only a
-   user toggle persists the open/collapsed state (fungi-plan-open, like the
+   user toggle persists the open/collapsed state (pot-plan-open, like the
    theme); auto-opens are momentary. ---- */
 const planDrawer = document.getElementById('plan-drawer');
 const planKnob = document.getElementById('plan-knob');
@@ -187,13 +187,13 @@ const planList = document.getElementById('plan-list');
 const planCount = document.getElementById('plan-count');
 
 function planPrefOpen() {
-  try { return localStorage.getItem('fungi-plan-open') !== '0'; } catch (e) { return true; }
+  try { return localStorage.getItem('pot-plan-open') !== '0'; } catch (e) { return true; }
 }
 
 function setPlanOpen(open, persist) {
   if (!planDrawer) return;
   planDrawer.classList.toggle('open', open);
-  if (persist !== false) { try { localStorage.setItem('fungi-plan-open', open ? '1' : '0'); } catch (e) {} }
+  if (persist !== false) { try { localStorage.setItem('pot-plan-open', open ? '1' : '0'); } catch (e) {} }
 }
 
 function renderPlan(plan, live) {
@@ -364,8 +364,8 @@ function renderSessionList() {
   const ids = filtered.map(s => s.id);
   const painted = Array.from(list.querySelectorAll('.session-row'), r => r.dataset.sid);
   const moved = ids.length !== painted.length || ids.some((id, i) => id !== painted[i]);
-  if (moved && window.fungiMotion && !window.fungiMotion.reduced && window.fungiMotion.listFlip)
-    window.fungiMotion.listFlip(list, mutate);
+  if (moved && window.potMotion && !window.potMotion.reduced && window.potMotion.listFlip)
+    window.potMotion.listFlip(list, mutate);
   else mutate();
 }
 const fmtDate = d => FC.fmtDate(d);
@@ -480,6 +480,12 @@ function registerArchived(subs) {
   (subs || []).forEach(r => {
     archived[r.id] = {
       layer: r.layer, tool: r.tool, goal: r.goal, replyFormat: r.reply_format,
+      // Old session files are the only source of these records (M2b retired
+      // spawn), and they carry the tail as `status` + `events` (trilayer.py's
+      // record). Without these two the modal showed "unknown" over an empty
+      // body — the fields were simply never mapped.
+      status: r.status || '',
+      history: r.events || [],
     };
     if (r.call_id) archivedByCall[r.call_id] = r.id;
   });
@@ -572,7 +578,7 @@ async function send() {
   sessionDirty = true;
   turn.userText = text;
   input.value = ''; setBusy(true); setStatus(T('status.thinking'));
-  _liveCount = 0; window.fungiMotion?.waveOn?.(status);
+  _liveCount = 0; window.potMotion?.waveOn?.(status);
   renderTurnLive();
   await pumpStream('/chat', { message: text, sessionId: sid, side: MY_SIDE });
   if (currentSessionId === sid) input.focus();
@@ -590,7 +596,7 @@ async function retryTurn() {
   sessionDirty = true;
   setBusy(true);
   setStatus(T('status.retrying'));
-  _liveCount = 0; window.fungiMotion?.waveOn?.(status);
+  _liveCount = 0; window.potMotion?.waveOn?.(status);
   renderTurnLive();
   await pumpStream('/retry', { sessionId: sid });
   if (currentSessionId === sid) input.focus();
@@ -713,7 +719,7 @@ function reattachIfRunning(sid) {
   abortCtrl = new AbortController(); stopRequested = false;
   turn = { sessionId: sid, entries: [] };
   setBusy(true); setStatus(T('status.reattaching'));
-  _liveCount = 0; window.fungiMotion?.waveOn?.(status);
+  _liveCount = 0; window.potMotion?.waveOn?.(status);
   renderTurnLive();
   pumpStream('/events?sessionId=' + encodeURIComponent(sid), null, 'GET');
 }
@@ -777,7 +783,7 @@ async function pumpStream(url, body, method = 'POST') {
     recoverAfterDrop(sid);
   }
   processing = false; setBusy(false);
-  window.fungiMotion?.waveOff?.();
+  window.potMotion?.waveOff?.();
 }
 
 /* Turn events update the model first, then touch the DOM only when the
@@ -945,10 +951,10 @@ function renderTurnLive() {
   // re-render — every text chunk rebuilds .live-node, re-animating all of
   // them would flicker (docs/webui-ux.md contract).
   var _live = S.el().querySelectorAll('.live-node');
-  if (window.fungiMotion && !window.fungiMotion.reduced) {
+  if (window.potMotion && !window.potMotion.reduced) {
     for (var _li = _liveCount; _li < _live.length; _li++) {
       var _n = _live[_li];
-      window.fungiMotion.msgIn(_n, _n.classList.contains('user') ? 'user'
+      window.potMotion.msgIn(_n, _n.classList.contains('user') ? 'user'
         : _n.classList.contains('assistant') ? 'assistant' : 'other');
     }
   }
@@ -999,7 +1005,7 @@ loadSessions().then(() => {
   // Reload keeps the current session: restore it and reattach if its turn
   // is still running server-side (the /events tape replays what was missed).
   let saved = null;
-  try { saved = localStorage.getItem('fungi-session'); } catch (e) {}
+  try { saved = localStorage.getItem('pot-session'); } catch (e) {}
   if (saved && allSessions.some(s => s.id === saved)) switchSession(saved);
 });
 
@@ -1028,9 +1034,9 @@ const PendingAsks = FC.initPendingAsks({
   displayOf,
   animatePlace: true,
   motion: {
-    cardIn: el => window.fungiMotion?.askCardIn?.(el),
+    cardIn: el => window.potMotion?.askCardIn?.(el),
     resolved: (card, ok, settle) => {
-      const M = window.fungiMotion;
+      const M = window.potMotion;
       if (M && !M.reduced && M.askResolved) {
         M.askResolved(card, ok);
         setTimeout(settle, 1000); // let the stamp read before collapsing
@@ -1124,13 +1130,13 @@ function displayOf(host) {
 const themeRoot = document.documentElement;
 function applyTheme(t) {
   themeRoot.dataset.theme = t;
-  try { localStorage.setItem('fungi-theme', t); } catch (e) {}
+  try { localStorage.setItem('pot-theme', t); } catch (e) {}
 }
-try { applyTheme(localStorage.getItem('fungi-theme') === 'dark' ? 'dark' : 'light'); } catch (e) { applyTheme('light'); }
+try { applyTheme(localStorage.getItem('pot-theme') === 'dark' ? 'dark' : 'light'); } catch (e) { applyTheme('light'); }
 document.getElementById('theme-switch').addEventListener('click', function () {
   var next = themeRoot.dataset.theme === 'dark' ? 'light' : 'dark';
-  if (window.fungiMotion && !window.fungiMotion.reduced && window.fungiMotion.themeTo) {
-    window.fungiMotion.themeTo(next, this, function () { applyTheme(next); });
+  if (window.potMotion && !window.potMotion.reduced && window.potMotion.themeTo) {
+    window.potMotion.themeTo(next, this, function () { applyTheme(next); });
     return;
   }
   themeRoot.classList.add('theme-anim'); // cross-fade colors, then back to instant

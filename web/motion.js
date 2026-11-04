@@ -1,5 +1,5 @@
-/* Fungi motion — the single GSAP-driven motion module.
-   Optional by contract: app.js only ever calls window.fungiMotion?.x?.(), so
+/* Pot motion — the single GSAP-driven motion module.
+   Optional by contract: app.js only ever calls window.potMotion?.x?.(), so
    removing this file (or web/vendor/) returns the UI to pure-CSS behavior.
    prefers-reduced-motion: the whole module collapses to { reduced: true } and
    every effect becomes a no-op. */
@@ -8,7 +8,7 @@
   var reduced = window.matchMedia &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (reduced || typeof gsap === 'undefined') {
-    window.fungiMotion = { reduced: true };
+    window.potMotion = { reduced: true };
     return;
   }
   document.documentElement.classList.add('motion-on');
@@ -56,7 +56,7 @@
         stamp.className = 'motion-stamp ' + (ok ? 'ok' : 'no');
         // i18n: the stamp is text the user reads, so it follows the launcher's
         // language like every other label (was hardcoded Chinese).
-        var t = window.FungiI18N;
+        var t = window.PotI18N;
         stamp.textContent = t ? t.t(ok ? 'consent.allowed' : 'consent.denied')
           : (ok ? '已放行' : '已拒绝');
         card.appendChild(stamp);
@@ -208,7 +208,7 @@
     });
   }
 
-  window.fungiMotion = {
+  window.potMotion = {
     reduced: false,
     msgIn: msgIn,
     askCardIn: askCardIn,

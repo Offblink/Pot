@@ -1,5 +1,6 @@
-/* Fungi shared web layer — one implementation for the pieces app.js (desktop)
-   and m.js (mobile) used to maintain in parallel. Exposed as window.FungiCommon.
+/* Pot shared web layer — the helpers app.js renders with (the ex-mobile shell
+   shared it too; that shell is gone with the mobile cut). Exposed as
+   window.PotCommon.
    Contracts preserved here:
    - pendingAskCards registration + placeAskCards re-mount (cards vanish mid-
      stream if either half is missing — see initPendingAsks).
@@ -9,13 +10,13 @@
   'use strict';
 
   /* WebUI i18n (web/i18n.js, loaded before this file): Chinese by default. */
-  const T = window.FungiI18N.t;
+  const T = window.PotI18N.t;
 
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
-     (console + window.__FUNGI_WEB_VER) — stale cache vs new server is otherwise
+     (console + window.__POT_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__FUNGI_WEB_VER = 'web-local-send';
-  try { console.info('[fungi-web]', window.__FUNGI_WEB_VER); } catch (e) {}
+  window.__POT_WEB_VER = 'web-local-send';
+  try { console.info('[pot-web]', window.__POT_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
      nothing and gets plain relative fetches back. */
@@ -52,7 +53,7 @@
     const days = Math.floor(h / 24);
     if (days < 7) return days + 'd';
     return new Date(d).toLocaleDateString(
-      locale || (window.FungiI18N.lang === 'zh' ? 'zh-CN' : 'en-US'),
+      locale || (window.PotI18N.lang === 'zh' ? 'zh-CN' : 'en-US'),
       { month: 'short', day: 'numeric' }
     );
   }
@@ -116,21 +117,6 @@
       overlay.addEventListener('click', e => { if (e.target.id === 'confirm-overlay') closeConfirm(false); });
     }
   }
-
-  /* ---------- send-file progress modal (基建) ----------
-     One modal for every file the user sends. The page never sees the bytes:
-     the browser mints a job id, hands it to POST /comm-send, and polls
-     /transfer-progress while the SERVER moves the upload to the hub
-     (fungi/xfer.py). The phone has one hop more — the browser's own push to
-     this host — which XHR measures client-side, so it gets a step of its own.
-     The last step belongs to the OTHER end (§49): the upload finishing only
-     means the room has the bytes, so the modal waits for the peer's verdict
-     (landed with a path, or refused/truncated with a reason) and never calls a
-     send "done" on the strength of its own upload.
-     Both shells pass their step labels; every step shows its own bar + note.
-     A shell without the modal markup still sends — the flows just skip the
-     card (open() returns false and they fall back to the bare request). */
-  
 
   /* ---------- live countdown ticker (§74) ----------
      One 1s interval drives every running elapsed/total readout on screen —
@@ -778,7 +764,7 @@
     else if (days === 1) date = T('time.yesterday');
     else if (days === 2) date = T('time.beforeYesterday');
     else if (days >= 0 && days < 7) {
-      date = (WEEKDAYS[window.FungiI18N.lang] || WEEKDAYS.en)[d.getDay()];
+      date = (WEEKDAYS[window.PotI18N.lang] || WEEKDAYS.en)[d.getDay()];
     }
     else date = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     return date + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
@@ -1336,7 +1322,7 @@
       /* 关闭动画还在跑时又被点开：`overwrite:'auto'`（motion.js 里设的）会把那条 out 补间掐掉，
          它的 onComplete 不会跑 —— 所以「开着没」必须由 isOpen 说了算，不能看 `menu.hidden`
          （补间没结束时它还是 false，快速两下点击就会卡成「看起来开着其实已经收掉」）。 */
-      window.fungiMotion?.menuIn?.(menu);
+      window.potMotion?.menuIn?.(menu);
       window.addEventListener('scroll', place, true);
       window.addEventListener('resize', place);
       let i = names.indexOf(current);
@@ -1360,7 +1346,7 @@
         menu.hidden = true;
         held = -1;
       };
-      if (window.fungiMotion?.menuOut) window.fungiMotion.menuOut(menu, finish);
+      if (window.potMotion?.menuOut) window.potMotion.menuOut(menu, finish);
       else finish();
     }
     function flash(cls, text) {
@@ -1446,7 +1432,7 @@
     return { load, use };
   }
 
-  window.FungiCommon = {
+  window.PotCommon = {
     initHttp, url, fetchJSON, postJSON,
     escapeHtml, fmtDate, getSessionTitle,
     initConfirmModal, showConfirm, closeConfirm,

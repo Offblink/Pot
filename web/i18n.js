@@ -1,11 +1,11 @@
-/* Fungi WebUI i18n — two languages, Chinese by default.
+/* Pot WebUI i18n — two languages, Chinese by default.
  *
- * Loaded before common.js in both shells (desktop index.html, mobile m.html),
- * right after /lang.js. The language is a LAUNCHER setting (settings page →
- * config.json `ui_lang`), not a WebUI control: /lang.js is generated from
- * `load_config()` on every request and sets `window.FUNGI_LANG` before this
- * file runs. No localStorage override — the launcher is the one place it is
- * set, so the desktop page and the phone cannot disagree.
+ * Loaded before common.js, right after /lang.js. The language is a LAUNCHER
+ * setting (top-bar switch → config.json `ui_lang`), not a WebUI control:
+ * /lang.js is generated from `load_config()` on every request and sets
+ * `window.POT_LANG` before this file runs. No localStorage override — the
+ * launcher is the one place it is set, so the two halves cannot disagree.
+ * A change takes effect on the WebUI's next load (the switch says so).
  *
  * Strings are flat keys. `t(key, vars)` substitutes `{name}` placeholders.
  * Static markup carries the key, never the text:
@@ -452,7 +452,7 @@
 
   // /lang.js ran first and carries the launcher's choice. Chinese when it is
   // absent or names anything we do not have — never the browser's locale.
-  const lang = window.FUNGI_LANG === 'en' ? 'en' : 'zh';
+  const lang = window.POT_LANG === 'en' ? 'en' : 'zh';
 
   function t(key, vars) {
     const table = DICT[lang] || DICT.zh;
@@ -478,7 +478,7 @@
     });
   }
 
-  window.FungiI18N = {
+  window.PotI18N = {
     t,
     apply,
     get lang() { return lang; },

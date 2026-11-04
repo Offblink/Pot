@@ -82,10 +82,10 @@ def test_i18n_js_and_the_language_script_are_served(room, zh):
     base = room.open_webui(False)
     with urllib.request.urlopen(base + "/i18n.js") as r:
         assert r.status == 200
-        assert "FUNGI_LANG" in r.read().decode("utf-8")
+        assert "POT_LANG" in r.read().decode("utf-8")
     with urllib.request.urlopen(base + "/lang.js") as r:
         assert r.status == 200
-        assert 'window.FUNGI_LANG = "zh";' in r.read().decode("utf-8")
+        assert 'window.POT_LANG = "zh";' in r.read().decode("utf-8")
 
 
 def test_desktop_defaults_to_chinese(browser, room, zh):

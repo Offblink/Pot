@@ -83,6 +83,7 @@ _STATIC_ROUTES = frozenset(
         "/motion.js",
         "/i18n.js",
         "/lang.js",
+        "/favicon.png",
     )
 )
 
@@ -528,6 +529,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
             "/style.css",
             "/motion.js",
             "/i18n.js",
+            "/favicon.png",
         ):
             self._send_static(route.lstrip("/"))
         elif route == "/lang.js":
@@ -537,7 +539,7 @@ class YesSirHandler(BaseHTTPRequestHandler):
             lang = load_config().ui_lang
             if lang not in UI_LANGS:
                 lang = "zh"
-            body = f"window.FUNGI_LANG = {json.dumps(lang)};".encode()
+            body = f"window.POT_LANG = {json.dumps(lang)};".encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/javascript; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
