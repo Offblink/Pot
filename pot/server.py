@@ -46,6 +46,7 @@ _mime = {
     ".js": "text/javascript; charset=utf-8",
     ".css": "text/css; charset=utf-8",
     ".json": "application/json",
+    ".png": "image/png",
 }
 
 
