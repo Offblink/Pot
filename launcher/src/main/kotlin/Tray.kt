@@ -25,6 +25,9 @@ class TrayController {
     private var onStop: () -> Unit = {}
     private var onExit: () -> Unit = {}
 
+    /** The menu currently on screen (one at a time). */
+    private var popup: javax.swing.JPopupMenu? = null
+
     /** Owner for a heavyweight popup: a 1×1 window with no taskbar entry. */
     private val popupOwner: javax.swing.JWindow by lazy {
         javax.swing.JWindow().apply {
@@ -46,6 +49,11 @@ class TrayController {
         this.onStart = onStart
         this.onStop = onStop
         this.onExit = onExit
+        // An open menu belongs to the tray that is about to be replaced or removed
+        // (host stopped/crashed, language flipped). Without this it outlived its
+        // tray icon and sat on the desktop as an orphan window (user report,
+        // 2026-11-04: 「出现托盘关了还在的情况」).
+        closePopup()
         EventQueue.invokeLater {
             icon?.let {
                 runCatching { SystemTray.getSystemTray().remove(it) }
@@ -73,9 +81,22 @@ class TrayController {
     }
 
     fun dispose() {
+        closePopup()
         EventQueue.invokeLater {
             icon?.let { runCatching { SystemTray.getSystemTray().remove(it) } }
             icon = null
+        }
+    }
+
+    /** The one place an open menu dies; safe to call at any time. */
+    private fun closePopup() {
+        val open = popup
+        popup = null
+        open?.let {
+            runCatching {
+                it.isVisible = false
+                javax.swing.SwingUtilities.getWindowAncestor(it)?.dispose()
+            }
         }
     }
 
@@ -88,7 +109,24 @@ class TrayController {
     }
 
     private fun showMenu() {
+        closePopup()
         val menu = javax.swing.JPopupMenu()
+        popup = menu
+        // Swing dismisses on ESC/outside-press itself; keep our handle honest so a
+        // later closePopup() never touches a dead window.
+        menu.addPopupMenuListener(
+            object : javax.swing.event.PopupMenuListener {
+                override fun popupMenuWillBecomeInvisible(e: javax.swing.event.PopupMenuEvent) {
+                    popup = null
+                }
+
+                override fun popupMenuWillBecomeVisible(e: javax.swing.event.PopupMenuEvent) = Unit
+
+                override fun popupMenuCanceled(e: javax.swing.event.PopupMenuEvent) {
+                    popup = null
+                }
+            },
+        )
         // A heavyweight popup can float above the taskbar; a lightweight one would
         // be clipped to the (invisible, 1×1) owner.
         menu.isLightWeightPopupEnabled = false
@@ -101,7 +139,7 @@ class TrayController {
             val entry = javax.swing.JMenuItem(label)
             entry.isEnabled = enabled
             entry.addActionListener {
-                menu.isVisible = false
+                closePopup()
                 action()
             }
             menu.add(entry)
@@ -134,7 +172,7 @@ class TrayController {
             w.addWindowFocusListener(
                 object : java.awt.event.WindowAdapter() {
                     override fun windowLostFocus(e: java.awt.event.WindowEvent) {
-                        menu.isVisible = false
+                        closePopup()
                     }
                 },
             )
