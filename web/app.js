@@ -113,14 +113,11 @@ async function closeCurrentSession() {
   loadSessions();
 }
 async function switchSession(id) {
-  const wasFriend = friendView !== null;
-  leaveFriendView();
   if (id === currentSessionId) {
     // The open session's own card: alternate showing/hiding its records. The
     // user's rule (2026-10-31) — click to open, click again to hide, click again
     // to bring them back. (Was an early return + an unconditional pane wipe, so
     // the records vanished with nothing to repaint them.)
-    if (wasFriend) { sessionHidden = false; await reloadSessionFromServer(); return; }
     sessionHidden = !sessionHidden;
     if (sessionHidden) S.clearMsgs();
     else await reloadSessionFromServer();
@@ -173,6 +170,34 @@ function renderMessages(s) {
     renderTurnLive();
   }
   placeAskCards(); // friend-view inline cards move back to the banner here
+  renderPlan(s.plan || []);
+}
+
+/* ---- plan todo card (裁决 17): the session's plan sits above the transcript.
+   A flip to done strikes the item through with a growing bar (style.css), so a
+   fresh paint (all-done items) shows them struck and a live flip animates. ---- */
+function renderPlan(plan) {
+  const box = document.getElementById('messages');
+  if (!box) return;
+  let card = box.querySelector('.plan-card');
+  if (!plan || !plan.length) { if (card) card.remove(); return; }
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'plan-card';
+    box.prepend(card);
+  }
+  const sig = plan.map(it => it.text).join('\u0001');
+  if (card.dataset.sig !== sig) {
+    card.dataset.sig = sig;
+    card.innerHTML = '<div class="plan-card-title">' + escapeHtml(T('plan.title')) + '</div><ul>'
+      + plan.map(it => '<li class="plan-item' + (it.done ? ' done' : '') + '"><span class="plan-text">'
+        + escapeHtml(it.text) + '</span></li>').join('')
+      + '</ul>';
+    return;
+  }
+  // Same list: only toggle done classes — the CSS width transition is the animation.
+  const items = card.querySelectorAll('.plan-item');
+  plan.forEach((it, i) => { if (items[i]) items[i].classList.toggle('done', !!it.done); });
 }
 
 /* Timeline + transcript rendering live in common.js (FC.renderTranscript /
@@ -188,7 +213,6 @@ const renderOpts = extra => Object.assign({
   reasoningHtml: t => '<div style="white-space:pre-wrap;max-height:200px;overflow-y:auto">' + escapeHtml(t) + '</div>',
   liveText: r => { const text = FC.silentText(r.text); return text ? marked.parse(text) : ''; },
 }, extra || {});
-const FRIEND_SIDE = { user: ' friend-peer', agent: ' friend-mine' }; // peer left, courier right (style.css)
 /* This shell *is* the computer: it renders its own rows on the right and the
    phone's on the left, and it tells the server the same thing when it sends, so
    a plain message row can be sided too (§59). */
@@ -196,7 +220,6 @@ const MY_SIDE = 'computer';
 
 async function newSession() {
   rateTok.clear();  // 新对话从零开始：速率读数只在“有输出/刚输出过”时才有意义
-  leaveFriendView();
   // Any untouched "(new session)" on disk? Focus it instead of creating
   // another one — repeated clicks and switches must not litter the list.
   const empty = allSessions.find(s => s.title === '(new session)' && (s.msgCount || 0) <= 1 && !s.running);
@@ -248,44 +271,44 @@ function renderSessionList() {
         const titleEl = row.querySelector('.session-row-title');
         if (titleEl && !row.querySelector('.rename-input') && titleEl.textContent !== (s.title || T('session.untitled')))
           titleEl.textContent = s.title || T('session.untitled');
-        // The reuse path rewrites the row in place: the transfer session's own
-        // meta ("只搬文件") must survive it, or it turns back into a date the
-        // moment the list repaints (§54).
-        if (!s.shuttle) {
-          row.querySelector('.session-row-meta').textContent = fmtDate(s.created) + (s.running ? ' \u25cf' : '');
-        }
+        row.querySelector('.session-row-meta').textContent = fmtDate(s.created) + (s.running ? ' \u25cf' : '');
         paintAlert(row, s.alert);  // §61: reuse must refresh the dot too
         row.classList.toggle('active', s.id === currentSessionId);
+        row.classList.toggle('pinned', !!s.pinned);  // 裁决 18: the pin survives every repaint
         return row;
       }
       const fresh = document.createElement('div');
       fresh.dataset.sid = s.id;
-      // The transfer session (§53/§54) is a channel between two devices, not a
-      // chat: pinned, iconned, styled apart, and it has no rename/delete pair.
-      fresh.className = 'session-row' + (s.shuttle ? ' shuttle' : '')
+      fresh.className = 'session-row' + (s.pinned ? ' pinned' : '')
         + (s.id === currentSessionId ? ' active' : '');
-      if (s.shuttle) fresh.title = T('desktop.shuttleTitle');
-      fresh.innerHTML = (s.shuttle ? '<span class="session-row-icon">&#x1F4C1;</span>' : '')
-        + '<span class="session-row-title">' + escapeHtml(s.shuttle ? T('shuttle.title') : (s.title || T('session.untitled'))) + '</span>'
-        + '<span class="session-row-meta">' + (s.shuttle ? T('desktop.shuttleMeta') : fmtDate(s.created))
-        + (s.running ? ' \u25cf' : '') + '</span>'
-        + (s.shuttle ? ''
-          : '<span class="session-row-actions"><button class="session-row-act" title="' + escapeHtml(T('desktop.rename')) + '">&#9998;</button>'
-            + '<button class="session-row-act del" title="' + escapeHtml(T('desktop.delete')) + '">&#10005;</button></span>');
-      if (!s.shuttle) {
-        fresh.querySelector('.session-row-act.del').addEventListener('click', e => {
-          e.stopPropagation();
-          const cur = sessionById(fresh.dataset.sid);
-          showConfirm({
-            title: T('desktop.deleteTitle'),
-            message: T('desktop.deleteMessage', { title: (cur && cur.title) || T('session.untitled') }),
-            confirmText: T('desktop.deleteConfirm'),
-            danger: true,
-            onConfirm: () => deleteSession(fresh.dataset.sid)
-          });
+      fresh.innerHTML = '<span class="session-row-title">' + escapeHtml(s.title || T('session.untitled')) + '</span>'
+        + (s.role ? '<span class="session-row-role">' + escapeHtml(s.role) + '</span>' : '')
+        + '<span class="session-row-meta">' + fmtDate(s.created) + (s.running ? ' \u25cf' : '') + '</span>'
+        + '<span class="session-row-actions">'
+        + '<button class="session-row-pin" title="' + escapeHtml(T('desktop.pin')) + '"></button>'
+        + '<button class="session-row-act" title="' + escapeHtml(T('desktop.rename')) + '">&#9998;</button>'
+        + '<button class="session-row-act del" title="' + escapeHtml(T('desktop.delete')) + '">&#10005;</button></span>';
+      fresh.querySelector('.session-row-pin').addEventListener('click', async e => {
+        e.stopPropagation();
+        const cur = sessionById(fresh.dataset.sid);
+        try {
+          await fetch('/pin', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: fresh.dataset.sid, pinned: !(cur && cur.pinned) }) });
+        } catch (err) {}
+        await loadSessions();  // the server owns the order: pinned group first
+      });
+      fresh.querySelector('.session-row-act.del').addEventListener('click', e => {
+        e.stopPropagation();
+        const cur = sessionById(fresh.dataset.sid);
+        showConfirm({
+          title: T('desktop.deleteTitle'),
+          message: T('desktop.deleteMessage', { title: (cur && cur.title) || T('session.untitled') }),
+          confirmText: T('desktop.deleteConfirm'),
+          danger: true,
+          onConfirm: () => deleteSession(fresh.dataset.sid)
         });
-        fresh.querySelector('.session-row-act:not(.del)').addEventListener('click', e => { e.stopPropagation(); startRename(fresh); });
-      }
+      });
+      fresh.querySelector('.session-row-act:not(.del)').addEventListener('click', e => { e.stopPropagation(); startRename(fresh); });
       paintAlert(fresh, s.alert);
       fresh.addEventListener('click', () => switchSession(s.id));
       return fresh;
@@ -469,16 +492,11 @@ let stopTimer = null;
 let turn = null; // active turn: {sessionId, buffer, reasoning, reasoningOpen, tools, asks, errors}
 
 /* The send button is three things in one: send, a visible stop while a turn
-   runs, and — when the box is empty — a retry of the last turn. The one
-   exception is the file-transfer assistant, whose key is always send (user rule,
-   2026-10-31). */
-function inShuttle() {
-  const s = (allSessions || []).find(x => x.id === currentSessionId);
-  return !!(s && s.shuttle);
-}
+   runs, and — when the box is empty — a retry of the last turn. */
+
 function refreshSendButton() {
   if (processing) return; // the busy (■) label is owned by setBusy
-  const retry = !input.value.trim() && !inShuttle();
+  const retry = !input.value.trim();
   btn.innerHTML = retry ? T('ui.retry') : T('ui.send');
   btn.title = retry ? T('ui.retry') : T('ui.send');
 }
@@ -747,6 +765,11 @@ function handleTurnEvent(obj) {
     case 'sessionId':
       if (!t.sessionId) t.sessionId = obj.content;
       break;
+    case 'plan':
+      // 裁决 17: the plan card repaints in place; done flips strike through
+      // with the CSS sweep. The disk copy is re-read on the next full render.
+      if (visible) renderPlan(obj.content.plan || []);
+      break;
     case 'done': {
       // A finished session turn may only repaint its own pane: with a friend
       // conversation open, refresh the session list and leave #messages alone
@@ -853,13 +876,12 @@ input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   if (e.key === 'Escape' && abortCtrl && turn) requestStop();
 });
-// The button is stop while a turn runs, retry when the box is empty (except in
-// the file-transfer assistant), send otherwise.
+// The button is stop while a turn runs, retry when the box is empty, send otherwise.
 btn.addEventListener("click", () => {
   if (processing && turn) { requestStop(); return; }
   if (!input.value.trim()) {
-    if (!inShuttle()) retryTurn(); // empty + a normal session = retry the last turn
-    return;                        // shuttle: an empty press does nothing
+    retryTurn(); // empty box = retry the last turn
+    return;
   }
   send();
 });
@@ -917,7 +939,7 @@ const buildAnsweredAskCard = Asks.buildAnsweredAskCard;
 const PendingAsks = FC.initPendingAsks({
   http: FC,
   banner: () => document.getElementById('asks-banner'),
-  inlineHost: () => friendView,
+  inlineHost: () => null,
   msgs: () => msgs,
   isNearBottom,
   displayOf,
@@ -956,7 +978,7 @@ resumeIfPending();
        it (BUG-08). Say what is wrong instead, and leave the card to the case
        it was written for. */
     if (r.status === 403) {
-      document.getElementById('auth-banner').hidden = false;
+      setStatus(T('auth.expired'));
       return;
     }
     const d = await r.json();
@@ -988,12 +1010,8 @@ resumeIfPending();
   } catch (e) {}
 })();
 
-/* ---------- friends: room members + read-only comm clone conversations ---------- */
-let friendView = null; // host name while viewing a friend conversation (wire identity)
+/* ---------- display names (asks + session labels fall back to the wire name) ---------- */
 let allPeers = []; // [{name, display}] — display is the nickname, "" falls back to name
-let lastFriendPayload = null; // rendered /comm-log JSON: skip no-change repaints
-const friendIsLocal = {}; // host -> peer lives on THIS machine (payload's local_peer);
-                          // a send there skips the modal's 「② 对方接收」 step (§79)
 
 function peerName(p) { return typeof p === 'string' ? p : (p && p.name) || ''; }
 function peerDisplay(p) { return typeof p === 'string' ? p : ((p && p.display) || peerName(p)); }
@@ -1002,249 +1020,21 @@ function displayOf(host) {
   return host; // no display -> wire name
 }
 
-/* The only place that changes which view owns #messages, so the pane flag and
-   `friendView` cannot drift apart: a friend host takes the pane, null gives it
-   back to the session. */
-function setView(host) {
-  friendView = host;
-  pane.take(host ? 'friend' : 'session');
-}
-
-function leaveFriendView() {
-  const wasViewing = friendView !== null;
-  // Only a REAL owner change wipes the pane. Calling setView(null) while the
-  // session already owns it used to erase the transcript with nothing to
-  // repaint it — clicking the open session card made its records vanish
-  // (2026-10-31 user report).
-  if (wasViewing) setView(null);
-  lastFriendPayload = null;
-  clearTimeout(friendLiveTimer);
-  document.getElementById('input-area').style.display = '';
-  document.getElementById('friend-input-area').hidden = true;
-  document.getElementById('friend-title').textContent = '';
-  document.getElementById('friend-bar').classList.remove('visible');
-  renderFriendList();
-  if (wasViewing) {
-    // setView wiped the message area without touching session state: re-render
-    // the session that was on screen.
-    if (currentSessionId) reloadSessionFromServer();
-  }
-}
-
-async function loadPeers() {
-  try {
-    const r = await fetch('/peers');
-    if (!r.ok) return;
-    const d = await r.json();
-    allPeers = d.peers || [];
-    document.getElementById('friends-count').textContent = allPeers.length ? '(' + allPeers.length + ')' : '';
-    renderFriendList();
-    if (pane.is('friend')) refreshFriendChat();
-  } catch (e) {}
-}
 
 
-function renderFriendList() {
-  const list = document.getElementById('friend-list');
-  const empty = document.getElementById('friends-empty');
-  // Plain rebuild (no keyed Flip): /peers polls every 5s and the roster is
-  // tiny, so a simple re-render reads calmer than list animation.
-  list.querySelectorAll('.friend-row').forEach(r => r.remove());
-  if (!allPeers.length) { empty.style.display = ''; return; }
-  empty.style.display = 'none';
-  allPeers.forEach(p => {
-    const name = peerName(p);
-    const row = document.createElement('div');
-    row.className = 'friend-row' + (name === friendView ? ' active' : '');
-    row.title = name;
-    const n = (name === friendView) ? 0 : (MailUnread.byPeer()[name] || 0); // viewing the thread = no badge
-    row.innerHTML = '<span class="friend-dot"></span><span class="friend-name">' + escapeHtml(peerDisplay(p)) + '</span>'
-      + (n ? '<span class="friend-unread">' + n + '</span>' : '');
-    row.addEventListener('click', () => openFriendChat(name));
-    list.appendChild(row);
-  });
-}
-async function openFriendChat(host) {
-  /* Nav audit: this must only ever run from the friend-row click. If a user
-     ever reports an uninvited jump into the friend view, window.__navlog holds
-     every entry with the JS stack that triggered it. */
-  try { (window.__navlog = window.__navlog || [])
-    .push({ t: new Date().toISOString(), host, stack: new Error().stack }); } catch (e) {}
-  setView(host);
-  lastFriendPayload = null;
-  lastTransferCount = -1;
-  document.getElementById('input-area').style.display = 'none';
-  document.getElementById('friend-input-area').hidden = false;
-  document.getElementById('friend-title').textContent = ' \u2014 @' + displayOf(host);
-  document.getElementById('friend-bar').classList.add('visible');
-  renderFriendList();
-  initConsentSlider();
-  try {
-    const cm = await (await fetch('/consent-mode?host=' + encodeURIComponent(host))).json();
-    setConsentSlider(cm.mode || 'ask');
-  } catch (e) { setConsentSlider('ask'); }
-  await refreshFriendChat();
-}
 
-function setConsentSlider(mode) {
-  const s = document.getElementById('consent-slider');
-  if (!s) return;
-  s.dataset.mode = mode;
-  s._mode = mode;
-}
 
-function initConsentSlider() {
-  const s = document.getElementById('consent-slider');
-  if (!s || s._wired) return;
-  s._wired = true;
-  const apply = clientX => {
-    const rect = s.getBoundingClientRect();
-    const mode = (clientX - rect.left) < rect.width / 2 ? 'allow' : 'ask';
-    if (mode === s._mode || !pane.is('friend')) return;
-    setConsentSlider(mode);
-    fetch('/consent-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: friendView, mode }) }).catch(() => {});
-  };
-  s.addEventListener('pointerdown', e => { s.setPointerCapture(e.pointerId); apply(e.clientX); });
-  s.addEventListener('pointermove', e => { if (s.hasPointerCapture && s.hasPointerCapture(e.pointerId)) apply(e.clientX); });
-}
 
-let friendLiveTimer = null;
-async function refreshFriendChat() {
-  const host = friendView;
-  if (!host) return;
-  // keep the open friend view near-real-time: the hub delivers instantly,
-  // only this poll gates the paint. Reschedule FIRST: every early return
-  // below (!r.ok, raced switch) must not kill the polling chain.
-  clearTimeout(friendLiveTimer);
-  friendLiveTimer = setTimeout(refreshFriendChat, 1500);
-  try {
-    const r = await fetch('/comm-log?host=' + encodeURIComponent(host));
-    if (!r.ok) return;
-    const d = await r.json();
-    if (friendView !== host) return; // raced a switch away: never paint here
-    friendIsLocal[host] = !!d.local_peer; // fresh before every send decision
-    const payload = JSON.stringify(d);
-    if (payload === lastFriendPayload) return; // unchanged: no flicker
-    lastFriendPayload = payload;
-    try {
-      renderFriendChat(d);
-    } catch (e) {
-      // A paint that threw must not freeze the view: uncache the payload so
-      // the next poll retries instead of skipping it as "unchanged" forever.
-      lastFriendPayload = null;
-      console.error('renderFriendChat:', e);
-    }
-  } catch (e) {}
-}
+
+
+
+
+
+
+
 
 /* the live tape renderer is shared too (FC.renderLiveEvents) */
-function renderFriendChat(d) {
-  const p = F;
-  const messages = d.messages || [];
-  const events = d.events || [];
-  const live = d.live || [];
-  const mails = d.mails || [];
-  if (!messages.length && !events.length && !mails.length && !live.length) {
-    // Nothing to show (a room with no traffic yet, or a wiped transcript):
-    // decide before clearing — wiping the pane with an empty payload is what
-    // made it look like the conversation had been lost.
-    return;
-  }
-  p.clear();
-  registerArchived(d.subagents || []);
-  const stick = isNearBottom(msgs); // measure before the repaint replaces the DOM
-  const mailBodies = new Set(mails.map(m => String(m.body || '').trim()).filter(Boolean));
-  const opts = renderOpts({
-    friend: true, side: FRIEND_SIDE, mailBodies, report: true, feedbackHost: friendView,
-  });
-  FC.renderTranscript(F, messages, d.asks || [], opts);
-  var fileNodes = [];
-  events.forEach(row => {
-    let node = null;
-    if (row.kind === 'transfer') {
-      if (row.file) {
-        // A transfer wears the same card as the shuttle's rows (§78); rows
-        // logged before the structured fields existed keep the text line.
-        // Which side: the comm-log is the pair's shared tape, so a row whose
-        // source host is not the peer was sent by THIS host.
-        const mine = String(row.src || '').split(':')[0] !== friendView;
-        node = FC.buildFileCard(row.file, {
-          side: mine ? ' mine' : ' peer',
-          who: mine ? T('file.sentByMe')
-            : T('file.sentByPeer', { host: row.file.sender || displayOf(friendView) }),
-        });
-        p.append(node); // detached builder — attach before insertByTs reorders
-      } else {
-        node = p.add('friend-event file', '&#x1F4C4 ' + escapeHtml(row.text || T('friend.transfer')));
-      }
-    }
-    else if (row.kind === 'task')
-      node = p.add('friend-event task', '&#x1F4E5 ' + escapeHtml(T('friend.delegatedTo', { host: row.dst || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
-    else if (row.kind === 'result')
-      node = p.add('friend-event result', '&#x2714 ' + escapeHtml(T('friend.replied', { host: row.src || '?' })) + ' ' + escapeHtml((row.text || '').slice(0, 200)));
-    if (node) {
-      FC.markTs(node, row.ts);   // envelopes carry the hub's timestamp
-      FC.insertByTs(p, node, row.ts);
-      if (row.kind === 'transfer') fileNodes.push(node);
-    }
-  });
-  // New file landed since the previous poll -> spore burst from its card
-  // (first render of a view replays history silently: lastTransferCount < 0).
-  if (fileNodes.length > lastTransferCount && lastTransferCount >= 0) {
-    window.fungiMotion?.spores?.(fileNodes[fileNodes.length - 1]);
-  }
-  lastTransferCount = fileNodes.length;
-  MailUnread.markPeerRead(friendView); // seeing the thread IS reading it
-  mails.forEach(m => {
-    const body = String(m.body || '');
-    const subject = String(m.subject || '');
-    const html = (subject && subject !== '(no subject)' && subject !== body
-      ? '<strong>' + escapeHtml(subject) + '</strong><br>' : '') + marked.parse(body);
-    const mine = !!m.mine;
-    const who = mine ? T('friend.me')
-      : (String(m.from || '').endsWith(':human')
-        ? T('friend.userFrom', { host: displayOf(m.peer) })
-        : T('friend.agentOf', { host: displayOf(m.peer) }));
-    const bubble = p.add('user' + (mine ? ' friend-mine' : ' friend-peer'), html);
-    const lab = document.createElement('div');
-    lab.className = 'human-label';
-    lab.textContent = who;
-    bubble.prepend(lab);
-    FC.markTs(bubble, m.ts);   // mail rows carry the mailbox timestamp
-    FC.insertByTs(p, bubble, m.ts);
-  });
-  FC.renderLiveEvents(live, p, opts);
-  placeAskCards(); // re-seat pending asks after the transcript repaint
-  if (stick) p.stick();
-  updateScrollBtn();
-}
 
-setInterval(loadPeers, 5000);
-/* The file-transfer session (§53) is written by the *other* device too: poll it
-   while it is open so a file the phone sent shows up here without a reload.
-   Which id that is comes from /sessions (entry.shuttle), never a copy here.
-
-   Incremental on purpose (§55): only the rows added since our cursor, appended;
-   with nothing new the DOM is not touched at all (a full repaint every 3 s made
-   the scrollbar come and go) and the session list is never reloaded from here. */
-async function pollShuttle() {
-  if (document.hidden || !currentSessionId) return;
-  const open = (allSessions || []).find(s => s.id === currentSessionId);
-  if (!open || !open.shuttle) return;
-  try {
-    const r = await fetch('/session?id=' + encodeURIComponent(open.id) + '&after=' + rawMessages.length);
-    if (!r.ok) return;
-    const fresh = (await r.json()).messages || [];
-    if (!fresh.length) return;
-    rawMessages = rawMessages.concat(fresh);
-    const stick = isNearBottom(msgs);
-    FC.renderTranscript(S, fresh, [], renderOpts());
-    if (stick && S.stick()) updateScrollBtn();
-  } catch (e) {}
-}
-setInterval(pollShuttle, 3000);
-loadPeers();
 
 /* theme: light default, persisted; the switch flips html[data-theme] */
 const themeRoot = document.documentElement;
@@ -1295,64 +1085,11 @@ function applyAlerts(map) {
 
 const Alerts = FC.initSessionAlerts({
   http: FC,
-  // 好友视图握着 #messages：那时这个页面没在看任何会话，也就不该替它挡铃。
-  showing: () => (!friendView && currentSessionId) ? currentSessionId : '',
+  showing: () => currentSessionId || '',
   onChange: map => { if (applyAlerts(map)) renderSessionList(); },
 });
 Alerts.start();
 
-/* ---------- mail unread: per-peer badges on the friend list ---------- */
-const MailUnread = FC.initMailUnread({ http: FC, onChange: renderFriendList });
-MailUnread.start();
 
-/* ---------- send-file progress modal (shared implementation) ---------- */
-const Xfer = FC.initTransfer({ http: FC });
+/* ---------- input composer (the session shell) ---------- */
 
-
-/* ---------- friend view composer: human direct sends ---------- */
-const friendInput = document.getElementById('friend-input');
-async function commSend(payload) {
-  if (!pane.is('friend')) return;
-  const btn = document.getElementById('friend-send');
-  btn.disabled = true;
-  try {
-    const r = await fetch('/comm-send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(Object.assign({ host: friendView }, payload)) });
-    const d = await r.json();
-    if (d.error) F.add('friend-event', '&#x26A0 ' + escapeHtml(d.error));
-  } catch (e) {} finally { btn.disabled = false; }
-  setTimeout(refreshFriendChat, 300); // pull the new message/file event in quickly
-}
-document.getElementById('friend-send').addEventListener('click', () => {
-  const t = friendInput.value.trim();
-  if (!t) return;
-  friendInput.value = '';
-  commSend({ text: t });
-});
-friendInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('friend-send').click(); }
-});
-document.getElementById('friend-browse').addEventListener('click', async () => {
-  try {
-    const r = await fetch('/pickfile', { method: 'POST' });
-    const d = await r.json();
-    if (d.path) await sendFileToFriend(d.path);
-  } catch (e) {}
-});
-/* One file to one friend, with the progress modal: the bytes leave from this
-   host (the file is already on its disk) and the job the modal polls follows
-   them to the hub, then waits for the peer's own verdict (§49) — the modal only
-   says "已收到" once the file is on their disk. See FC.initTransfer. */
-async function sendFileToFriend(path) {
-  try {
-    await Xfer.sendOne(
-      T('xfer.sendToFriend', { name: displayOf(friendView) }),
-      friendView,
-      path,
-      !!friendIsLocal[friendView] // sending to ourselves: no peer-receive bar (§79)
-    );
-  } catch (e) {
-    // the modal already shows it; nothing else to say here
-  }
-  setTimeout(refreshFriendChat, 300);
-}

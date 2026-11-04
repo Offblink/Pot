@@ -143,11 +143,12 @@ def test_a_403_is_not_mistaken_for_an_unconfigured_shell(page):
         page.evaluate("() => document.getElementById('config-overlay').classList.contains('show')")
         is False
     ), "403 opened the configure card"
+    # The banner element died with the room cut; the 403 now speaks on the status line.
     shown = page.evaluate(
         """() => {
-          const b = document.getElementById('auth-banner');
-          return !!(b && !b.hidden && b.textContent.trim().length > 0);
+          const s = document.getElementById('status');
+          return !!(s && s.textContent.trim().length > 0);
         }"""
     )
-    assert shown is True, "no banner told the reader the page is unauthorized"
+    assert shown is True, "no status line told the reader the page is unauthorized"
     page.unroute("**/config-status")

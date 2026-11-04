@@ -119,9 +119,6 @@ def test_desktop_follows_the_launcher_setting_in_english(browser, room, english)
         ctx.close()
 
 
-
-
-
 def test_a_silent_agent_gets_a_line_instead_of_an_empty_bubble(browser, room, zh):
     """A turn whose reply is only `<<SILENT>>` reads as 「（Agent不说话）」 — the
     marker is control text and never reaches the screen."""

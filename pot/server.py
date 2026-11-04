@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from pot import runlog, session
-from pot.agent import SYSTEM_PROMPT, Agent, public_messages
+from pot.agent import SYSTEM_PROMPT, Agent, BoundTool, public_messages
 from pot.config import (
     PROJECT_ROOT,
     RESOURCE_ROOT,
@@ -29,14 +29,17 @@ from pot.config import (
     save_config,
     switch_model,
 )
+from pot.errors import PotError
 from pot.events import NullSink, Sink
 from pot.llm import probe_model
 from pot.openfile import open_with_default, reveal_in_folder
+from pot.plan import TODO_SCHEMA, PlanStore
 from pot.tools.ask import resolve_ask
 from pot.tools.mcp import mcp_extra_tools
 from pot.trilayer import TriLayer
 
 WEB_DIR = RESOURCE_ROOT / "web"
+PLANS_DIR = PROJECT_ROOT / "data" / "plans"  # one plan per session (裁决 17)
 
 _mime = {
     ".html": "text/html; charset=utf-8",
@@ -157,6 +160,23 @@ def repair_tool_gaps(messages: list[dict]) -> list[dict]:
     return out
 
 
+def _plan_tool(session_id: str, sink: Sink) -> BoundTool:
+    """The plan `todo` tool (裁决 17): full replace, saved with the session, and
+    announced live so the chat card can strike finished items through."""
+    store = PlanStore(PLANS_DIR)
+
+    def _run(args: dict) -> str:
+        try:
+            plan, flipped = store.apply(session_id, args.get("items"))
+        except PotError as exc:
+            return f"ERROR: {exc}"
+        session.set_plan(session_id, plan)
+        sink.emit("plan", {"plan": plan, "flipped": flipped})
+        return json.dumps({"ok": True, "plan": plan, "flipped": flipped}, ensure_ascii=False)
+
+    return BoundTool(schema=TODO_SCHEMA, fn=_run)
+
+
 class WebUIRuntime:
     """Turn/sessions/answer wiring for the WebUI. Default = single-host mode."""
 
@@ -182,11 +202,26 @@ class WebUIRuntime:
         messages: list[dict],
         subagents: list | None = None,
         asks: list | None = None,
+        plan: list | None = None,
+        pinned: bool | None = None,
+        role: str | None = None,
     ) -> None:
-        session.save_session(session_id, title, messages, subagents=subagents, asks=asks)
+        session.save_session(
+            session_id,
+            title,
+            messages,
+            subagents=subagents,
+            asks=asks,
+            plan=plan,
+            pinned=pinned,
+            role=role,
+        )
 
     def sessions_delete(self, session_id: str) -> None:
         session.delete_session(session_id)
+
+    def sessions_pin(self, session_id: str, pinned: bool) -> None:
+        session.set_pinned(session_id, pinned)
 
     def new_session_id(self) -> str:
         return session.new_session_id()
@@ -215,6 +250,8 @@ class WebUIRuntime:
         )
         agent = layer.build_orchestrator(sink)
         agent.tool_abort_event = tool_bg
+        if sid:
+            agent.extra_tools["todo"] = _plan_tool(sid, sink)
         return agent
 
     def dispatch_background(self, sid: str, command: str, cwd: str | None = None) -> dict:
@@ -540,6 +577,8 @@ class YesSirHandler(BaseHTTPRequestHandler):
             for entry in sessions:
                 # §61: the red dot — what the session wants, or None for quiet.
                 entry["alert"] = alerts.get(str(entry.get("id")))
+            # Stable sort: pinned sessions float, each group keeps recency order.
+            sessions.sort(key=lambda entry: not entry.get("pinned"))
             with _TURNS_LOCK:
                 for s in sessions:
                     tape = _TURN_TAPES.get(str(s.get("id")))
@@ -641,6 +680,14 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {"alerts": mark_seen(str(data.get("id") or ""), bool(data.get("visible")))}
             )
+        elif url.path == "/pin":
+            data = self._read_body()
+            sid = str(data.get("id") or "")
+            if not sid or self.runtime.sessions_load(sid) is None:
+                self._send_json({"error": "not found"}, status=404)
+                return
+            self.runtime.sessions_pin(sid, bool(data.get("pinned")))
+            self._send_json({"ok": True})
         elif url.path == "/model":
             # spec §66: the header's dropdown calls this. Switching is a write
             # plus one tiny completion — the page is told both facts separately,

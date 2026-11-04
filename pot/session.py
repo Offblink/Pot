@@ -135,6 +135,8 @@ class SessionStore:
                     "created": data.get("created"),
                     "updated": data.get("updated"),
                     "msgCount": len(data.get("messages", [])),
+                    "pinned": bool(data.get("pinned")),
+                    "role": data.get("role"),
                 }
             )
         return result
@@ -146,16 +148,19 @@ class SessionStore:
         messages: list[dict[str, Any]],
         subagents: list[dict[str, Any]] | None = None,
         asks: list[dict[str, Any]] | None = None,
+        plan: list[dict[str, Any]] | None = None,
+        pinned: bool | None = None,
+        role: str | None = None,
     ) -> None:
         self.ensure_dir()
         path = self.dir / f"{session_id}.json"
         with _lock_for(path):
             created = _now()
+            existing: dict[str, Any] = {}
             if path.is_file():
                 with contextlib.suppress(OSError, json.JSONDecodeError):
-                    created = json.loads(path.read_text(encoding="utf-8-sig")).get(
-                        "created", created
-                    )
+                    existing = json.loads(path.read_text(encoding="utf-8-sig"))
+                created = existing.get("created", created)
             payload = {
                 "id": session_id,
                 "title": title,
@@ -165,7 +170,33 @@ class SessionStore:
                 "subagents": subagents or [],
                 "asks": asks or [],
             }
+            # Keys this save does not own survive it (the plan tool and the pin
+            # button write them out of band).
+            for key in ("plan", "pinned", "role"):
+                if key in existing:
+                    payload[key] = existing[key]
+            if plan is not None:
+                payload["plan"] = plan
+            if pinned is not None:
+                payload["pinned"] = pinned
+            if role is not None:
+                payload["role"] = role
             _write_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def set_key(self, session_id: str, key: str, value: Any) -> bool:
+        """Write one out-of-band key (plan/pinned/role) without touching the rest."""
+        path = self.dir / f"{session_id}.json"
+        with _lock_for(path):
+            if not path.is_file():
+                return False
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (OSError, json.JSONDecodeError):
+                return False
+            data[key] = value
+            data["updated"] = _now()
+            _write_atomic(path, json.dumps(data, ensure_ascii=False, indent=2))
+            return True
 
     def load(self, session_id: str) -> dict[str, Any] | None:
         path = self.dir / f"{session_id}.json"
@@ -209,8 +240,23 @@ def save_session(
     messages: list[dict[str, Any]],
     subagents: list[dict[str, Any]] | None = None,
     asks: list[dict[str, Any]] | None = None,
+    plan: list[dict[str, Any]] | None = None,
+    pinned: bool | None = None,
+    role: str | None = None,
 ) -> None:
-    _store().save(session_id, title, messages, subagents, asks)
+    _store().save(session_id, title, messages, subagents, asks, plan, pinned, role)
+
+
+def set_plan(session_id: str, plan: list[dict[str, Any]]) -> bool:
+    return _store().set_key(session_id, "plan", plan)
+
+
+def set_pinned(session_id: str, pinned: bool) -> bool:
+    return _store().set_key(session_id, "pinned", bool(pinned))
+
+
+def set_key(session_id: str, key: str, value: Any) -> bool:
+    return _store().set_key(session_id, key, value)
 
 
 def load_session(session_id: str) -> dict[str, Any] | None:
