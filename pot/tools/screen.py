@@ -22,8 +22,8 @@ Design decisions live in docs/spec.md §35; the load-bearing ones:
 - An elevated window (UAC secure desktop) stays out of reach: UIPI. That is the
   hard boundary and the natural human/machine line, not an implementation gap.
 
-Local agent only (spec §35.3): `trilayer.build_orchestrator` and the room's
-user-facing turn agent attach it; comm agents and spawned subagents never do.
+Local agent only (spec §35.3): `pot.agents.build_planner` attaches it for the
+user-facing session, and a role gets it only through its own `tools` field.
 """
 
 from __future__ import annotations

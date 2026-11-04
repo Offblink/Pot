@@ -4,15 +4,22 @@ import pytest
 
 from pot import skills
 from pot.agent import Agent
+from pot.agents import build_planner, build_role
+from pot.board import Board
 from pot.config import Config
 from pot.events import FnSink
 from pot.llm import LLMResult
-from pot.trilayer import TriLayer
+from pot.roles import Role, RoleRepo
 
 
 @pytest.fixture(autouse=True)
 def _skills_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(skills, "SKILLS_DIR", tmp_path / "skills")
+
+
+@pytest.fixture
+def board(tmp_path) -> Board:
+    return Board(tmp_path / "board.sqlite", RoleRepo(tmp_path / "roles"))
 
 
 def test_seed_creates_meta_skill():
@@ -64,12 +71,17 @@ def test_section_lists_skills():
     assert "- writing-skills:" in section
 
 
-def test_clone_agent_gets_section_and_tool():
+def test_role_agent_gets_section_and_readonly_tool(board):
+    """A resident role reads skills but can never rewrite the prompt store
+    (autonomous agent security, spec §1.1); the user-facing Planner can."""
     sink = FnSink(lambda _t, _c: None)
-    readonly = TriLayer(Config(api_key="k"), sink).build_clone_agent(
-        sink, system_prompt="P", extra_tools={}
+    readonly = build_role(
+        Config(api_key="k"),
+        sink,
+        role=Role(id="worker", name="W", mission="m", tools=[]),
+        session_id="s1",
+        board=board,
     )
-    assert readonly.system_prompt.startswith("P")
     assert "## Skills" in readonly.system_prompt
     assert "skills" in readonly.extra_tools
     assert (
@@ -78,9 +90,7 @@ def test_clone_agent_gets_section_and_tool():
         .startswith("ERROR")
     )
 
-    writable = TriLayer(Config(api_key="k"), sink, skill_save=True).build_clone_agent(
-        sink, system_prompt="P", extra_tools={}
-    )
+    writable = build_planner(Config(api_key="k"), sink, board=board)
     assert (
         writable.extra_tools["skills"]
         .fn({"action": "save", "name": "x", "body": "b"})
@@ -89,9 +99,9 @@ def test_clone_agent_gets_section_and_tool():
     assert (skills.SKILLS_DIR / "x" / "SKILL.md").is_file()
 
 
-def test_orchestrator_includes_skills_tool():
+def test_planner_includes_skills_tool(board):
     sink = FnSink(lambda _t, _c: None)
-    agent = TriLayer(Config(api_key="k"), sink).build_orchestrator(sink)
+    agent = build_planner(Config(api_key="k"), sink, board=board)
     assert "## Skills" in agent.system_prompt
     assert (
         agent.extra_tools["skills"]

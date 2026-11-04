@@ -107,6 +107,13 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .msg.tool .tool-bg{margin-left:auto;background:var(--surface2);color:var(--text2);border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.3rem 0.7rem;font-size:0.72rem;font-weight:600;cursor:pointer;font-family:var(--font);transition:all var(--t-fast)}
 .msg.tool .tool-bg:hover{border-color:var(--accent);color:var(--accent2)}
 .msg.tool .tool-bg:disabled{opacity:0.5;cursor:default}
+/* 后台执行作业状态芯片 (M2b): status only — final output arrives as a [job report] row */
+.job-chip{display:inline-flex;align-items:center;gap:6px;margin-top:6px;padding:2px 8px;border:1px solid var(--border);border-radius:99px;background:var(--surface2);font-size:0.7rem;line-height:1.5;color:var(--text2)}
+.job-chip.running{border-color:var(--tool-border);color:var(--tool-accent)}
+.job-chip .job-state{font-weight:600;letter-spacing:0.02em}
+.job-chip .job-kill{border:none;background:none;color:var(--dim);cursor:pointer;font-size:0.72rem;line-height:1;padding:0 3px}
+.job-chip .job-kill:hover{color:var(--error-text)}
+.job-chip .job-kill:disabled{opacity:0.5;cursor:default}
 .msg.error{align-self:flex-start;background:var(--error-bg);border:1px solid var(--error-border);color:var(--error-text);font-size:0.84rem;box-shadow:0 2px 8px rgba(0,0,0,0.04)}
 .msg.reasoning{align-self:flex-start;background:var(--surface);border:1px solid var(--border);font-size:0.8rem;max-width:96%;padding:0.65rem 1rem;border-radius:var(--radius-sm);color:var(--text2);box-shadow:0 1px 4px rgba(0,0,0,0.03)}
 .msg.reasoning summary{cursor:pointer;font-weight:600;color:var(--accent2);padding:0.3rem 0;font-size:0.78rem;letter-spacing:0.03em;text-transform:uppercase}
@@ -331,14 +338,35 @@ html.motion-on .agent-bubble{animation:none}
 /* ---- role badge (spec §5): a session that belongs to a resident role ---- */
 .session-row-role{font-size:10px;font-family:var(--mono);color:var(--accent2);border:1px solid var(--border);border-radius:99px;padding:0 6px;line-height:1.6;flex-shrink:0;background:var(--surface2)}
 
-/* ---- plan todo card (裁决 17): updatable card in chat, done items strike through ---- */
-.plan-card{align-self:stretch;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem 0.95rem;margin:0.2rem 0;box-shadow:var(--shadow-card)}
-.plan-card-title{font-size:0.72rem;font-family:var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.4rem}
-.plan-card ul{list-style:none;margin:0;padding:0}
+/* ---- plan drawer (裁决 17): collapsible right-edge sidebar, Spore drawer pattern.
+   Slides in/out on translateX; the knob rides the panel's left edge (closed: it
+   sits alone at the viewport's right edge). Sits inside #chat-wrap so the input
+   bar below stays usable while the plan is open. ---- */
+#plan-drawer{position:absolute;top:0;right:0;height:100%;width:300px;z-index:60;transform:translateX(300px);transition:transform 0.42s var(--ease-out-expo);pointer-events:none}
+#plan-drawer.open{transform:translateX(0)}
+#plan-drawer.empty #plan-knob{display:none}
+#plan-knob{position:absolute;left:-28px;top:50%;transform:translateY(-50%);width:28px;padding:12px 0 10px;border:1px solid var(--border);border-right:none;border-radius:var(--radius-sm) 0 0 var(--radius-sm);background:var(--surface);color:var(--dim);cursor:pointer;pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:8px;box-shadow:var(--shadow-sidebar);transition:color var(--t-fast),background var(--t-fast)}
+#plan-knob:hover{color:var(--text);background:var(--surface2)}
+.plan-knob-label{writing-mode:vertical-rl;font-size:0.72rem;font-family:var(--mono);letter-spacing:0.14em}
+#plan-count{writing-mode:horizontal-tb;min-width:17px;height:17px;padding:0 4px;border-radius:99px;background:var(--accent);color:var(--on-accent);font-size:10px;font-family:var(--mono);display:flex;align-items:center;justify-content:center;line-height:1}
+#plan-count.all-done{background:var(--surface2);color:var(--accent)}
+#plan-panel{width:100%;height:100%;background:var(--surface);border-left:1px solid var(--border);display:flex;flex-direction:column;pointer-events:auto;box-shadow:var(--shadow-sidebar)}
+#plan-panel-head{display:flex;align-items:center;justify-content:space-between;padding:0.75rem 0.9rem;border-bottom:1px solid var(--border);font-size:0.72rem;font-family:var(--mono);color:var(--dim);text-transform:uppercase;letter-spacing:0.05em;flex-shrink:0}
+#plan-close{background:none;border:none;color:var(--dim);cursor:pointer;font-size:1rem;line-height:1;padding:2px 6px;border-radius:var(--radius-xs);transition:color var(--t-fast),background var(--t-fast)}
+#plan-close:hover{color:var(--text);background:var(--surface2)}
+#plan-list{list-style:none;margin:0;padding:0.7rem 0.9rem;overflow-y:auto;flex:1;scrollbar-width:thin}
 .plan-item{position:relative;padding:0.18rem 0 0.18rem 1.4rem;font-size:0.86rem;color:var(--text);line-height:1.55;transition:color var(--t-med) var(--ease-smooth)}
 .plan-item::before{content:"";position:absolute;left:0;top:0.42rem;width:0.8rem;height:0.8rem;border:1.5px solid var(--border);border-radius:4px;transition:all var(--t-med) var(--ease-smooth)}
 .plan-item.done{color:var(--dim)}
 .plan-item.done::before{background:var(--accent);border-color:var(--accent)}
+/* The ✓ inside the green box: ::before is the box, ::after paints the check on
+   top (the strike line lives on .plan-text::after, so this slot is free).
+   --on-accent is white on the light theme's dark green and near-black on the
+   dark theme's bright green — the check reads on both. */
+.plan-item::after{content:"";position:absolute;left:0;top:0.42rem;width:0.8rem;height:0.8rem;background:var(--on-accent);opacity:0;transition:opacity var(--t-med) var(--ease-smooth);
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.4l2.4 2.4 4.6-5.2' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/0.62rem no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.4l2.4 2.4 4.6-5.2' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/0.62rem no-repeat}
+.plan-item.done::after{opacity:1}
 /* The strike line GROWS left→right once an item flips done — that sweep is the animation. */
 .plan-item .plan-text{position:relative;display:inline}
 .plan-item .plan-text::after{content:"";position:absolute;left:0;top:55%;height:1.5px;width:0;background:currentColor;border-radius:1px;transition:width 0.45s var(--ease-out-expo)}

@@ -58,14 +58,6 @@ class ConsoleSink:
         elif event_type == "reasoning":
             sys.stdout.write(f"{self._COLORS['reasoning']}{content}{self._RESET}")
             sys.stdout.flush()
-        elif event_type == "agent_spawn":
-            layer = content.get("layer", 2)
-            goal = str(content.get("goal", ""))[:100]
-            print(f"\n\033[35m  \U0001f9e9 spawn L{layer}: {goal}\033[0m")
-        elif event_type == "agent_status":
-            marks = {"running": "\u23f3", "done": "\u2705", "failed": "\u274c"}
-            mark = marks.get(content.get("status"), "")
-            print(f"\033[35m  {mark} L-agent {content.get('id')} {content.get('status')}\033[0m")
         elif event_type == "ask":
             for q in content.get("questions", []):
                 opts = "/".join(o.get("label", "") for o in q.get("options", []))

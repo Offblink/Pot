@@ -26,7 +26,15 @@
       <svg class="theme-ic theme-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
     </div>
   </div>
-  <div id="chat-wrap"><div id="messages"></div><button id="scroll-bottom" data-i18n-title="ui.scrollBottom" title="回到底部">&#x2193;</button></div>
+  <div id="chat-wrap"><div id="messages"></div><button id="scroll-bottom" data-i18n-title="ui.scrollBottom" title="回到底部">&#x2193;</button>
+    <div id="plan-drawer" class="empty">
+      <button id="plan-knob" data-i18n-title="plan.title" title="计划"><span class="plan-knob-label" data-i18n="plan.title">计划</span><span id="plan-count"></span></button>
+      <div id="plan-panel">
+        <div id="plan-panel-head"><span data-i18n="plan.title">计划</span><button id="plan-close" data-i18n-title="plan.collapse" title="收起">&times;</button></div>
+        <ul id="plan-list"></ul>
+      </div>
+    </div>
+  </div>
   <div id="asks-banner"></div>
   <div id="agent-tray" data-i18n-title="ui.subagents" title="子代理"></div>
   <div id="status"></div>

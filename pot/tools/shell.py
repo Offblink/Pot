@@ -86,13 +86,17 @@ def _unlink_quietly(path: Path) -> None:
 
 
 def tool_bash(
-    command: str, cwd: str | None = None, should_abort: Callable[[], bool] | None = None
+    command: str,
+    cwd: str | None = None,
+    should_abort: Callable[[], bool] | None = None,
+    should_detach: Callable[[], bool] | None = None,
 ) -> str:
     tag = f"pot-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     bat = Path(tempfile.gettempdir()) / f"{tag}.bat"
     out_path = Path(tempfile.gettempdir()) / f"{tag}.out"
     err_path = Path(tempfile.gettempdir()) / f"{tag}.err"
     out_fd = err_fd = -1
+    detached = False
     try:
         bat.write_text(f"chcp 65001 >nul\r\n{command}\r\n", encoding="utf-8", newline="")
         out_fd = _open_temporary(out_path)
@@ -142,6 +146,30 @@ def tool_bash(
             if should_abort is not None and should_abort():
                 _kill_tree()
                 return "ERROR: cancelled by user"
+            if should_detach is not None and should_detach():
+                # 后台执行 (裁决 20): hand the LIVE process and its open output
+                # handles to the job table — no kill, no re-run — and return at
+                # once. The job monitor owns bat/out/err from here (the finally
+                # below must not touch them).
+                from pot import jobs  # noqa: PLC0415 (lazy: jobs must not import shell)
+
+                job_id = jobs.adopt(
+                    command=command,
+                    cwd=cwd,
+                    bat=bat,
+                    out_fd=out_fd,
+                    err_fd=err_fd,
+                    proc=proc,
+                )
+                out_fd = err_fd = -1
+                detached = True
+                return (
+                    f"BACKGROUNDED (job={job_id}): the user moved this command to"
+                    " the background. It keeps running out-of-band and is NOT"
+                    " killed and NOT re-run. Its final output arrives later as a"
+                    " [job report] new turn. Do NOT run it again — continue with"
+                    " anything else the task needs, or end your turn."
+                )
             deadline -= 0.2
             if deadline <= 0:
                 _kill_tree()
@@ -162,9 +190,10 @@ def tool_bash(
     finally:
         _close_quietly(out_fd)
         _close_quietly(err_fd)
-        _unlink_quietly(bat)
-        _unlink_quietly(out_path)
-        _unlink_quietly(err_path)
+        if not detached:  # a detached run's files belong to its job monitor
+            _unlink_quietly(bat)
+            _unlink_quietly(out_path)
+            _unlink_quietly(err_path)
 
 
 # ---------------------------------------------------------------------------

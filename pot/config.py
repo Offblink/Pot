@@ -103,9 +103,6 @@ class Config:
     # Learned where we get proof (a probe came back ok) or where the user said so
     # (they typed the pair and saved): see remember_provider / adopt_provider.
     model_providers: dict[str, dict[str, str]] = field(default_factory=dict)
-    # Per-layer model override: layer number (1/2/3) -> model name.
-    # Layers without an entry fall back to `model` (see model_for).
-    layer_models: dict[int, str] = field(default_factory=dict)
     system_prompt: str | None = None
     # MCP servers (stdio): name -> {command, args?, env?}
     mcp_servers: dict[str, dict] = field(default_factory=dict)
@@ -129,10 +126,6 @@ class Config:
     @property
     def configured(self) -> bool:
         return bool(self.api_key) and self.api_key != DEFAULT_API_KEY
-
-    def model_for(self, layer: int) -> str:
-        """Model for one TriLayer layer: per-layer override if set, else `model`."""
-        return self.layer_models.get(layer) or self.model
 
 
 def remember_model(cfg: Config, model: str) -> bool:
@@ -381,11 +374,6 @@ def _load_config(path: Path | None = None) -> Config:
                 and v.get("endpoint")
                 and v.get("api_key")
             }
-        models = data.get("models")
-        if isinstance(models, dict):
-            cfg.layer_models = {
-                int(k): str(v) for k, v in models.items() if str(k) in ("1", "2", "3") and v
-            }
         if isinstance(data.get("mcp_servers"), dict):
             cfg.mcp_servers = {
                 str(k): v for k, v in data["mcp_servers"].items() if isinstance(v, dict)
@@ -443,8 +431,6 @@ def _save_config(cfg: Config, path: Path | None = None) -> None:
         # the add box then works on the first try, which is the whole point of the
         # memory (§68). One endpoint + one key per name is a few dozen bytes.
         data["model_providers"] = {m: dict(p) for m, p in cfg.model_providers.items()}
-    if cfg.layer_models:
-        data["models"] = {str(k): cfg.layer_models[k] for k in sorted(cfg.layer_models)}
     if cfg.system_prompt:
         data["system_prompt"] = cfg.system_prompt
     if cfg.mcp_servers:

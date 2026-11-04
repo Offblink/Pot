@@ -1,10 +1,10 @@
 """WebUI server: ThreadingHTTPServer + NDJSON streaming + static files from web/.
 
-Single-host mode keeps the original YESIR behavior (TriLayer in the request
-thread, local session files). Room mode (pot/room.py) injects a WebUIRuntime
-that runs the local clone's toolset, backs sessions per host (server: hub
-store; client: its own disk — never the peer-operated hub), and routes
-card answers back out as answer envelopes.
+Single-host mode (spec §1.2): TriLayer is gone — turns build a Planner agent
+(user sessions) or a resident role agent (sessions carrying a `role` key), and
+work moves across the board (pot/dispatch.py). Host-driven turns (role dispatch,
+job wakeups) reuse the same turn core with a tape-only sink, so a page watching
+that session reattaches through /events exactly like a live chat turn.
 """
 
 import contextlib
@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from pot import runlog, session
+from pot import agents, dispatch, jobs, runlog, session
 from pot.agent import SYSTEM_PROMPT, Agent, BoundTool, public_messages
 from pot.config import (
     PROJECT_ROOT,
@@ -30,13 +30,12 @@ from pot.config import (
     switch_model,
 )
 from pot.errors import PotError
-from pot.events import NullSink, Sink
+from pot.events import Sink
 from pot.llm import probe_model
 from pot.openfile import open_with_default, reveal_in_folder
 from pot.plan import TODO_SCHEMA, PlanStore
 from pot.tools.ask import resolve_ask
 from pot.tools.mcp import mcp_extra_tools
-from pot.trilayer import TriLayer
 
 WEB_DIR = RESOURCE_ROOT / "web"
 PLANS_DIR = PROJECT_ROOT / "data" / "plans"  # one plan per session (裁决 17)
@@ -182,8 +181,8 @@ class WebUIRuntime:
 
     # Monotonic timestamp of the last WebUI HTTP request: the "is anyone
     # actually looking" signal. ask notifications fire only when this is
-    # stale (nobody has the page open). Class attribute because RoomRuntime
-    # does not chain __init__; touch() shadows it per instance.
+    # stale (nobody has the page open). Class attribute so a runtime built
+    # without chaining __init__ still sees it; touch() shadows it per instance.
     last_seen: float = 0.0
 
     def touch(self) -> None:
@@ -223,76 +222,67 @@ class WebUIRuntime:
     def sessions_pin(self, session_id: str, pinned: bool) -> None:
         session.set_pinned(session_id, pinned)
 
+    def __init__(self, board=None, roles=None) -> None:
+        """board/roles: injectable for tests; default = dispatch's singletons."""
+        self._board = board
+        self._roles = roles
+
+    def board(self):
+        return self._board if self._board is not None else dispatch.board()
+
+    def roles_repo(self):
+        return self._roles if self._roles is not None else dispatch.roles_repo()
+
     def new_session_id(self) -> str:
         return session.new_session_id()
 
     def new_session_prompt(self) -> str:
-        return SYSTEM_PROMPT
+        # The turn runner rewrites the stored system row from
+        # agent.system_prompt every turn (skills/diary are managed there);
+        # this is what a brand-new session shows before its first turn.
+        return SYSTEM_PROMPT + agents.PLANNER_ADDENDUM
 
     def build_agent(self, sink: Sink, should_abort) -> Agent:
         sid = getattr(sink, "session_id", None) or ""
-        # Fresh event per turn: /stop pops+sets it to kill this turn's
-        # background subagents; a new turn must start with a clean one.
-        bg_abort = threading.Event()
-        _BG_ABORTS[sid] = bg_abort
-        # Narrow abort for 后台执行: stops only the running tool, never the turn.
+        # 后台执行 (裁决 20): a fresh per-turn detach signal — the button sets
+        # it, the running bash hands its process to the job table, the agent
+        # clears it after the call that consumed it.
         tool_bg = threading.Event()
         _BG_TOOL_ABORTS[sid] = tool_bg
 
         def _abort() -> bool:
-            return bool(should_abort and should_abort()) or bg_abort.is_set()
+            return bool(should_abort and should_abort())
 
-        layer = TriLayer(
-            load_config(),
-            sink,
-            should_abort=_abort,
-            spawn_done=lambda rec: _PENDING_SPAWNS.setdefault(sid, []).append(rec),
-        )
-        agent = layer.build_orchestrator(sink)
-        agent.tool_abort_event = tool_bg
-        if sid:
+        cfg = load_config()
+        stored = self.sessions_load(sid) if sid else None
+        role_id = str((stored or {}).get("role") or "")
+        role = None
+        if role_id:
+            try:
+                role = self.roles_repo().get(role_id)
+            except PotError as exc:
+                runlog.problem("role session %s: %s (falls back to Planner)", sid, exc)
+        if role is not None:
+            agent = agents.build_role(
+                cfg, sink, role=role, session_id=sid, board=self.board(), should_abort=_abort
+            )
+            # 计划 todo 挂角色会话（交接 M2b）: the plan card belongs to the
+            # session doing the work, not to the conversation that dispatched it.
             agent.extra_tools["todo"] = _plan_tool(sid, sink)
+        else:
+            agent = agents.build_planner(
+                cfg, sink, session_id=sid, board=self.board(), should_abort=_abort
+            )
+        agent.tool_abort_event = tool_bg
         return agent
-
-    def dispatch_background(self, sid: str, command: str, cwd: str | None = None) -> dict:
-        """Run a shell command in the background for an impatient user (§74).
-
-        The user is watching a long `bash` card count toward BASH_TIMEOUT and
-        clicks 后台执行: stop ONLY that running call (a narrow per-tool abort, so
-        the turn continues and the agent is told the command was backgrounded),
-        and re-dispatch the SAME command through the background tool. The output
-        lands later as a `[background report]` re-activation (via _PENDING_SPAWNS
-        -> /resume). We deliberately do NOT reuse /stop here — that ends the turn
-        AND clears _PENDING_SPAWNS, swallowing the very report we are about to
-        earn. A throwaway TriLayer mirrors build_agent: its own subagents dict is
-        not persisted, but the report injects fine when no stored record matches.
-        """
-        command = (command or "").strip()
-        if not command:
-            return {"ok": False, "error": "need a command"}
-        bg_abort = _BG_ABORTS.setdefault(sid, threading.Event())
-
-        def _abort() -> bool:
-            return bg_abort.is_set()
-
-        layer = TriLayer(
-            load_config(),
-            NullSink(),  # this dispatch has no live stream; the report rides /resume
-            should_abort=_abort,
-            spawn_done=lambda rec: _PENDING_SPAWNS.setdefault(sid, []).append(rec),
-        )
-        out = layer.bound_background(1).fn({"command": command, "cwd": cwd})
-        ok = not str(out).startswith("ERROR:")
-        if not ok:
-            runlog.problem("background-tool %s", out)
-        return {"ok": ok, "result": str(out)}
 
     def route_answer(self, ask_id: str, value: str | list[str]) -> bool:
         """Resolve an /answer submission. Default: in-process inquire only."""
         return resolve_ask(ask_id, value)
 
     def pending_asks(self) -> list[dict]:
-        """Out-of-band asks awaiting a card answer (room mode: envelope asks)."""
+        """Out-of-band asks: none in single-host mode — asks ride the live
+        stream and the answer route resolves them in-process."""
         return []
 
     def mcp_tools(self) -> dict:
@@ -309,17 +299,10 @@ _TURNS_LOCK = threading.Lock()
 _SESSION_LOCKS: dict[str, threading.Lock] = {}
 _SESSION_LOCKS_GUARD = threading.Lock()
 
-# Finished background subagents awaiting re-activation: session_id ->
-# [{"id","goal","status","answer"}]. Fed from spawn threads (TriLayer
-# spawn_done), drained atomically by /resume which injects them as a new
-# turn's input.
-_PENDING_SPAWNS: dict[str, list[dict]] = {}
-# Per-turn background aborts: /stop pops+sets the session's event so
-# already-dispatched background subagents die with the turn.
-_BG_ABORTS: dict[str, threading.Event] = {}
-# Per-turn NARROW abort: 后台执行 sets this to stop ONLY the running tool (the
-# bash card) while the agent keeps going. Distinct from _ACTIVE_TURNS (which
-# ends the turn) — the agent loop never reads it.
+# 后台执行 detach signal (裁决 20): one Event per running turn — the button
+# sets it, the running bash hands its process to the job table (pot/jobs.py),
+# the agent clears it after the call that consumed it. Distinct from
+# _ACTIVE_TURNS (which ends the turn) — the agent loop's stop path never reads it.
 _BG_TOOL_ABORTS: dict[str, threading.Event] = {}
 
 # Tombstones for sessions deleted while a turn was still running: the turn's
@@ -345,9 +328,9 @@ def _session_lock(session_id: str) -> threading.Lock:
 # focused, because a minimized webUI is not "opened" (user rule, 2026-09-21)
 # — says so every few seconds, and the server reads a fresh claim as "the user
 # is watching". A hidden or unfocused page sends nothing, its claim goes stale,
-# and the next event is real: the GUI rings (pot/gui/app.py) and the red dot
-# rides /sessions. Opening the session is what stops it — the shape of the
-# unread-mail ring (§25.2), with the page's own claim in place of the grace.
+# and the next event is real: the red dot rides /sessions. Opening the session
+# is what stops it — the shape of the unread-mail ring (§25.2), with the page's
+# own claim in place of the grace.
 
 ALERT_KINDS = ("ask", "done", "error")
 SEEN_TTL_S = 8.0  # a claim reads as "watching" this long (page heartbeat: 3 s)
@@ -410,9 +393,14 @@ def unanswered_asks(asks: list[dict] | None) -> bool:
 
 
 class WebSink:
-    """Thread-safe NDJSON writer over the /chat response stream."""
+    """Thread-safe NDJSON writer over the /chat response stream.
 
-    def __init__(self, handler: "YesSirHandler", session_id: str | None = None):
+    `handler=None` is the host-driven shape (role dispatch, job wakeups): the
+    event tape still records — so /events reattaches exactly as for a chat
+    turn — but there is no HTTP stream to write to.
+    """
+
+    def __init__(self, handler: "YesSirHandler | None", session_id: str | None = None):
         self.handler = handler
         self.session_id = session_id
         self.closed = False
@@ -429,7 +417,7 @@ class WebSink:
             # The agent is blocked on an answer: an ask that nobody watches is
             # raised right here, mid-turn (it can sit for ASK_TIMEOUT_S).
             note_alert(self.session_id, "ask")
-        if self.closed:
+        if self.closed or self.handler is None:
             return
         try:
             data = json.dumps({"type": kind, "content": content}, ensure_ascii=False)
@@ -612,11 +600,20 @@ class YesSirHandler(BaseHTTPRequestHandler):
                 )
         elif route == "/events":
             self._handle_events((parse_qs(url.query).get("sessionId") or [None])[0])
-        elif route == "/spawn-pending":
+        elif route == "/jobs":
             sid = (parse_qs(url.query).get("sessionId") or [None])[0]
-            with _TURNS_LOCK:
-                items = list(_PENDING_SPAWNS.get(sid or "") or [])
-            self._send_json({"pending": len(items), "items": items})
+            self._send_json({"jobs": jobs.list_jobs(sid)})
+        elif route == "/board":
+            # Human side of the board (spec §3.5; the launcher's page in M4
+            # consumes the same shape). Loopback-gated like every data route.
+            self._send_json(
+                {
+                    "cards": self.runtime.board().list(),
+                    "roles": [
+                        r.to_dict() for r in self.runtime.roles_repo().list(include_templates=True)
+                    ],
+                }
+            )
         else:
             self._send_json({"error": "not found"}, status=404)
 
@@ -638,32 +635,51 @@ class YesSirHandler(BaseHTTPRequestHandler):
             sid = str(data.get("sessionId") or "")
             with _TURNS_LOCK:
                 events = _ACTIVE_TURNS.pop(sid, set())
-                bg = _BG_ABORTS.pop(sid, None)
-                # Stop means stop: undelivered background reports must not
-                # auto-reactivate the session 3s later (frontend resume poll).
-                _PENDING_SPAWNS.pop(sid, None)
             for event in events:
                 event.set()
-            if bg is not None:
-                bg.set()  # kill background subagents of already-ended turns too
-            self._send_json({"ok": bool(events) or bg is not None})
+            self._send_json({"ok": bool(events)})
         elif url.path == "/background-tool":
-            # 后台执行 (§74): an impatient user backgrounds a long bash call. Stop
-            # ONLY that running call (the narrow tool abort) — the turn keeps
-            # going and the agent is told the command was backgrounded — then
-            # re-dispatch the same command via the background tool. Its output
-            # returns later through /spawn-pending -> /resume.
+            # 后台执行 (裁决 20): set the session's detach signal. The running
+            # bash picks it up within its 0.2s wait loop, hands its LIVE process
+            # to the job table (no kill, no re-run), and returns BACKGROUNDED
+            # with the job id; the output rides /jobs polling and a [job report]
+            # wake. We deliberately do NOT reuse /stop — that would kill the
+            # very process the job is about to adopt.
             data = self._read_body()
             sid = str(data.get("sessionId") or "")
             with _TURNS_LOCK:
                 tool_ev = _BG_TOOL_ABORTS.get(sid)
             if tool_ev is not None:
                 tool_ev.set()
-            self._send_json(
-                self.runtime.dispatch_background(sid, data.get("command"), data.get("cwd"))
-            )
-        elif url.path == "/resume":
-            self._handle_resume()
+            self._send_json({"ok": tool_ev is not None})
+        elif url.path == "/jobs/kill":
+            data = self._read_body()
+            ok = jobs.kill(str(data.get("id") or ""))
+            self._send_json({"ok": ok}, status=200 if ok else 404)
+        elif url.path == "/board/complete":
+            # Human ✓ (done is human-only, gate 5). The launcher's board page
+            # posts the same shape in M4.
+            data = self._read_body()
+            try:
+                card = self.runtime.board().human_complete(
+                    str(data.get("card_id") or ""), data.get("if_version")
+                )
+            except PotError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"ok": True, "card": card})
+        elif url.path == "/board/reject":
+            data = self._read_body()
+            try:
+                card = self.runtime.board().human_reject(
+                    str(data.get("card_id") or ""),
+                    str(data.get("reason") or ""),
+                    data.get("if_version"),
+                )
+            except PotError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"ok": True, "card": card})
         elif url.path == "/answer":
             data = self._read_body()
             value = data.get("value")
@@ -809,50 +825,15 @@ class YesSirHandler(BaseHTTPRequestHandler):
             return
         self._run_turn(session_id, user_msg=None, messages=messages)
 
-    def _handle_resume(self) -> None:
-        """Re-activate a session whose background subagent(s) finished: pop the
-        pending reports atomically and run a turn with them injected."""
-        data = self._read_body()
-        sid = str(data.get("sessionId") or "")
-        with _TURNS_LOCK:
-            items = _PENDING_SPAWNS.pop(sid, None)
-        if not items:
-            self._send_json({"ok": True, "injected": 0})
-            return
-        if _session_lock(sid).locked():
-            # A turn is running: hand the reports back so the client retries
-            # after it ends (pop-then-409 keeps results from being lost).
-            with _TURNS_LOCK:
-                _PENDING_SPAWNS.setdefault(sid, []).extend(items)
-            self._send_json({"busy": True}, status=409)
-            return
-        self._run_turn(sid, user_msg=None, resume_items=items)
-
-    @staticmethod
-    def _spawn_report(items: list[dict]) -> str:
-        rows = "\n".join(
-            f"- id={i['id']} ({i['status']}) goal: {str(i['goal'])[:120]}\n"
-            f"  report: {str(i['answer'])[:2000]}"
-            for i in items
-        )
-        return (
-            "[background report] Subagent task(s) you dispatched have finished. "
-            "This note is for you - the user sees your reply, not this note.\n" + rows
-        )
-
     def _run_turn(
         self,
         session_id: str | None,
         user_msg: str | None,
         messages=None,
-        resume_items: list[dict] | None = None,
     ) -> None:
         if messages is None and not session_id:
             # Generate before registering: /stop keys on the real session id.
             session_id = self.runtime.new_session_id()
-        abort_event = threading.Event()
-        with _TURNS_LOCK:
-            _ACTIVE_TURNS.setdefault(session_id, set()).add(abort_event)
         sink = WebSink(self, session_id)
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -861,117 +842,10 @@ class YesSirHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         try:
-            if _session_lock(session_id).locked():
-                # A queued turn must not look dead: say why nothing streams yet.
-                sink.emit("status", "Waiting for the still-running turn in this session...")
-            with _session_lock(session_id):
-                # Load context inside the lock: a queued turn must continue
-                # from the previous turn's persisted reply, not a snapshot
-                # taken before the wait (which dropped that reply on save).
-                stored = self.runtime.sessions_load(session_id) if session_id else None
-                if messages is None:
-                    if stored:
-                        messages = list(stored["messages"])
-                    else:
-                        messages = [
-                            {"role": "system", "content": self.runtime.new_session_prompt()}
-                        ]
-                    if user_msg is not None:
-                        messages.append({"role": "user", "content": user_msg})
-                if resume_items:
-                    # Patch the persisted spawn records with their final
-                    # status/answer, then inject the report as this turn's input.
-                    for rec in (
-                        (stored or {}).get("subagents", []) if isinstance(stored, dict) else []
-                    ):
-                        for item in resume_items:
-                            if rec.get("id") == item["id"]:
-                                rec["status"] = item["status"]
-                                rec["answer"] = item["answer"]
-                    # Their own agent_status events went to the (already
-                    # closed) spawning turn's stream, so the frontend bubbles
-                    # would never close: re-emit the final status here, on the
-                    # live resume stream.
-                    for item in resume_items:
-                        sink.emit("agent_status", {"id": item["id"], "status": item["status"]})
-                    messages.append({"role": "user", "content": self._spawn_report(resume_items)})
-                messages = repair_tool_gaps(messages)
-
-                # Persist at turn start: the user message must be on disk while
-                # the turn streams. Otherwise a refresh mid-turn shows an empty
-                # session and invites chatting into / deleting one that is busy.
-                prior = (stored or {}).get("subagents", []) if isinstance(stored, dict) else []
-                prior_asks = (stored or {}).get("asks", []) if isinstance(stored, dict) else []
-                self.runtime.sessions_save(
-                    session_id,
-                    session.get_session_title(messages),
-                    public_messages(messages),
-                    subagents=prior,
-                    asks=prior_asks,
-                )
-                # Start recording after the queue wait: a queued turn must not
-                # clobber the still-running turn's tape for the same session.
-                with _TURNS_LOCK:
-                    _TURN_TAPES[session_id] = []
-                agent = self.runtime.build_agent(sink, abort_event.is_set)
-                try:
-                    agent.run(messages)
-                finally:
-                    # Persist on every exit path (success, abort, crash): a
-                    # turn that never saves is a turn whose context is lost.
-                    subs = getattr(agent, "subagents", None)
-                    new_subs = list(subs.values()) if isinstance(subs, dict) else []
-                    new_asks = list(getattr(agent, "asks", None) or [])
-                    with _TURNS_LOCK:
-                        resurrects = session_id in _TURN_DELETED
-                        if resurrects:
-                            _TURN_DELETED.discard(session_id)
-                    if not resurrects:
-                        self.runtime.sessions_save(
-                            session_id,
-                            session.get_session_title(messages),
-                            public_messages(messages),
-                            subagents=prior + new_subs,
-                            asks=prior_asks + new_asks,
-                        )
-            # §61: a finished turn is news — unless the user stopped it (they
-            # were right there) or deleted the session under it. note_alert
-            # drops it anyway while a page is showing that session.
-            if not resurrects and not abort_event.is_set():
-                note_alert(session_id, "ask" if unanswered_asks(new_asks) else "done")
-            sink.emit("sessionId", session_id)
-            sink.emit("done", None)
-        except Exception as exc:
-            if not abort_event.is_set():  # a stopped turn must not ring, however it ended
-                note_alert(session_id, "error")
-            sink.emit("error", str(exc))
-            sink.emit("done", None)
+            _execute_turn(session_id, user_msg, messages=messages, sink=sink, runtime=self.runtime)
         finally:
-            # Seal the tape with a done marker (replay consumers close on it)
-            # and pop it after a grace window so late reattach still sees it.
-            # The pop must be generation-aware: a NEW turn in the same session
-            # may have installed a fresh tape within the grace window — popping
-            # by session id alone would delete a live turn's tape mid-run.
-            with _TURNS_LOCK:
-                tape = _TURN_TAPES.get(session_id)
-                if tape is not None:
-                    tape.append({"type": "done", "content": None})
-
-            def _pop_tape_if_current(_t=tape):
-                with _TURNS_LOCK:
-                    if _TURN_TAPES.get(session_id) is _t:
-                        _TURN_TAPES.pop(session_id, None)
-
-            seal = threading.Timer(_TAPE_GRACE_S, _pop_tape_if_current)
-            seal.daemon = True
-            seal.start()
-            with _TURNS_LOCK:
-                events = _ACTIVE_TURNS.get(session_id)
-                if events is not None:
-                    events.discard(abort_event)
-                    if not events:
-                        _ACTIVE_TURNS.pop(session_id, None)
-            self.wfile.flush()
+            with contextlib.suppress(Exception):  # stream may already be gone
+                self.wfile.flush()
 
     def _handle_events(self, session_id: str | None) -> None:
         """Reattach to a (recently) running turn: replay its recorded events,
@@ -1061,6 +935,183 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._send_json({"path": None, "error": str(exc)})
 
 
+# The runtime host-driven turns (role dispatch, job wakeups) run against: the
+# one server this process serves (installed by make_webui_server). Dict-held so
+# it is mutated, never rebound (no global statement).
+_HOST: dict = {}
+
+
+def host_turn(session_id: str, user_msg: str | None) -> None:
+    """A turn with no HTTP client behind it (spec: role dispatch, job
+    wakeups): the same core with a tape-only sink, so a page watching that
+    session reattaches through /events exactly like a live chat turn."""
+    runtime = _HOST.get("runtime") or WebUIRuntime()
+    _execute_turn(session_id, user_msg, sink=WebSink(None, session_id), runtime=runtime)
+
+
+def _after_turn(session_id: str, aborted: bool) -> None:
+    """Post-turn hooks: deliver jobs that finished while this turn ran (spec
+    §3.4 裁决 20 — 挂起补投), wake roles for claimable cards (M2b), and notify
+    the Planner when a dispatched card reaches review (spec §3.3). A stopped
+    turn does none of it — stop means stop."""
+    try:
+        # Snapshot first: a card that reaches review inside the flush or the
+        # dispatch cycle below counts as fresh for THIS hook.
+        before = dispatch.cards_in_review()
+        pending = jobs.flush(session_id)
+        if pending:
+            host_turn(session_id, "\n\n".join(jobs.report(j) for j in pending))
+        if aborted:
+            return
+        dispatch.dispatch_pending(host_turn)
+        fresh = dispatch.cards_in_review() - before
+        if fresh:
+            target = dispatch.latest_user_session()
+            if target:
+                cards = [dispatch.board().get(cid) for cid in sorted(fresh)]
+                host_turn(target, dispatch.review_note(cards))
+    except Exception as exc:
+        runlog.problem("after-turn %s: %s", session_id, exc)
+
+
+def _execute_turn(
+    session_id: str | None,
+    user_msg: str | None,
+    *,
+    sink: WebSink,
+    runtime: WebUIRuntime,
+    messages=None,
+) -> None:
+    """The turn core, shared by HTTP chat turns and host-driven turns:
+    register /stop → queue behind the session lock → load → run → save →
+    alert → seal the tape → schedule the after-turn hooks."""
+    if messages is None and not session_id:
+        session_id = runtime.new_session_id()
+    abort_event = threading.Event()
+    with _TURNS_LOCK:
+        _ACTIVE_TURNS.setdefault(session_id, set()).add(abort_event)
+    try:
+        if _session_lock(session_id).locked():
+            # A queued turn must not look dead: say why nothing streams yet.
+            sink.emit("status", "Waiting for the still-running turn in this session...")
+        with _session_lock(session_id):
+            # Load context inside the lock: a queued turn must continue
+            # from the previous turn's persisted reply, not a snapshot
+            # taken before the wait (which dropped that reply on save).
+            stored = runtime.sessions_load(session_id) if session_id else None
+            if messages is None:
+                if stored:
+                    messages = list(stored["messages"])
+                else:
+                    messages = [{"role": "system", "content": runtime.new_session_prompt()}]
+                if user_msg is not None:
+                    messages.append({"role": "user", "content": user_msg})
+            messages = repair_tool_gaps(messages)
+
+            # Persist at turn start: the user message must be on disk while
+            # the turn streams. Otherwise a refresh mid-turn shows an empty
+            # session and invites chatting into / deleting one that is busy.
+            prior = (stored or {}).get("subagents", []) if isinstance(stored, dict) else []
+            prior_asks = (stored or {}).get("asks", []) if isinstance(stored, dict) else []
+            # A role session keeps its mounted title (the card brief that wakes
+            # it would otherwise become the sidebar label on the first save);
+            # plain sessions derive the title from their first message as before.
+            if str((stored or {}).get("role") or ""):
+                title = str((stored or {}).get("title") or "") or session.get_session_title(
+                    messages
+                )
+            else:
+                title = session.get_session_title(messages)
+            runtime.sessions_save(
+                session_id,
+                title,
+                public_messages(messages),
+                subagents=prior,
+                asks=prior_asks,
+            )
+            # Start recording after the queue wait: a queued turn must not
+            # clobber the still-running turn's tape for the same session.
+            with _TURNS_LOCK:
+                _TURN_TAPES[session_id] = []
+            agent = runtime.build_agent(sink, abort_event.is_set)
+            fresh_prompt = getattr(agent, "system_prompt", None)
+            if fresh_prompt and messages and messages[0].get("role") == "system":
+                # The system row is host-managed: the rebuilt prompt (Planner
+                # addendum, live role mission, skills) must reach the model —
+                # a row frozen at session creation would pin the retired
+                # trilayer prompt forever.
+                messages[0] = {"role": "system", "content": fresh_prompt}
+            jobs.set_current_session(session_id)
+            try:
+                agent.run(messages)
+            finally:
+                jobs.set_current_session(None)
+                # Persist on every exit path (success, abort, crash): a
+                # turn that never saves is a turn whose context is lost.
+                new_asks = list(getattr(agent, "asks", None) or [])
+                with _TURNS_LOCK:
+                    resurrects = session_id in _TURN_DELETED
+                    if resurrects:
+                        _TURN_DELETED.discard(session_id)
+                if not resurrects:
+                    runtime.sessions_save(
+                        session_id,
+                        title,
+                        public_messages(messages),
+                        subagents=prior,
+                        asks=prior_asks + new_asks,
+                    )
+        # §61: a finished turn is news — unless the user stopped it (they
+        # were right there) or deleted the session under it. note_alert
+        # drops it anyway while a page is showing that session.
+        if not resurrects and not abort_event.is_set():
+            note_alert(session_id, "ask" if unanswered_asks(new_asks) else "done")
+        sink.emit("sessionId", session_id)
+        sink.emit("done", None)
+    except Exception as exc:
+        if not abort_event.is_set():  # a stopped turn must not ring, however it ended
+            note_alert(session_id, "error")
+        sink.emit("error", str(exc))
+        sink.emit("done", None)
+    finally:
+        # Seal the tape with a done marker (replay consumers close on it)
+        # and pop it after a grace window so late reattach still sees it.
+        # The pop must be generation-aware: a NEW turn in the same session
+        # may have installed a fresh tape within the grace window — popping
+        # by session id alone would delete a live turn's tape mid-run.
+        with _TURNS_LOCK:
+            tape = _TURN_TAPES.get(session_id)
+            if tape is not None:
+                tape.append({"type": "done", "content": None})
+
+        def _pop_tape_if_current(_t=tape):
+            with _TURNS_LOCK:
+                if _TURN_TAPES.get(session_id) is _t:
+                    _TURN_TAPES.pop(session_id, None)
+
+        seal = threading.Timer(_TAPE_GRACE_S, _pop_tape_if_current)
+        seal.daemon = True
+        seal.start()
+        with _TURNS_LOCK:
+            events = _ACTIVE_TURNS.get(session_id)
+            if events is not None:
+                events.discard(abort_event)
+                if not events:
+                    _ACTIVE_TURNS.pop(session_id, None)
+        # Deregistered first: the after-turn hooks must see this turn as gone
+        # (a job finishing now wakes the session instead of queueing behind it).
+        threading.Thread(
+            target=_after_turn, args=(session_id, abort_event.is_set()), daemon=True
+        ).start()
+
+
+# The job table wakes idle sessions through the same host turn (spec 裁决 20).
+jobs.bind(
+    is_busy=lambda sid: bool(_ACTIVE_TURNS.get(sid)),
+    wake=host_turn,
+)
+
+
 def _free_port(preferred: int | None) -> int:
     port = preferred or 0
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -1074,7 +1125,7 @@ def run_server(port: int | None = None, runtime: WebUIRuntime | None = None) -> 
     rt = runtime or WebUIRuntime()
     server = make_webui_server(port, rt)
     url = f"http://localhost:{server.server_address[1]}"
-    print(f"  YESIR web UI: {url}")
+    print(f"  Pot WebUI: {url}")
     print("  Press Ctrl+C to stop")
     webbrowser.open(url)
     mcp_tools = rt.mcp_tools()
@@ -1104,7 +1155,8 @@ class WebUIServer(ThreadingHTTPServer):
 
 
 def make_webui_server(port: int | None, runtime: WebUIRuntime) -> WebUIServer:
-    """Build (not start) the WebUI server; room mode embeds this in-process."""
+    """Build (not start) the WebUI server; tests embed this in-process."""
+    _HOST["runtime"] = runtime  # host-driven turns (dispatch, job wakeups) target it
     handler = type("BoundHandler", (YesSirHandler,), {"runtime": runtime})
     server = WebUIServer(("127.0.0.1", _free_port(port)), handler)
     runlog.note("WebUI listening on 127.0.0.1:%d", server.server_address[1])

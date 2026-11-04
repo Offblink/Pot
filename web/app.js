@@ -14,6 +14,7 @@ function setCurrentSession(id) {
   currentSessionId = id;
   try { if (id) localStorage.setItem('fungi-session', id); else localStorage.removeItem('fungi-session'); } catch (e) {}
   refreshSendButton(); // send vs retry depends on the session (shuttle always sends)
+  startJobsPoll(); // jobs 芯片: one interval per open session, torn down on close/switch
 }
 
 /* ---------- helpers ---------- */
@@ -171,34 +172,61 @@ function renderMessages(s) {
   }
   placeAskCards(); // friend-view inline cards move back to the banner here
   renderPlan(s.plan || []);
+  syncJobChips(); // a re-rendered transcript loses chips; re-bind them from text
 }
 
-/* ---- plan todo card (裁决 17): the session's plan sits above the transcript.
-   A flip to done strikes the item through with a growing bar (style.css), so a
-   fresh paint (all-done items) shows them struck and a live flip animates. ---- */
-function renderPlan(plan) {
-  const box = document.getElementById('messages');
-  if (!box) return;
-  let card = box.querySelector('.plan-card');
-  if (!plan || !plan.length) { if (card) card.remove(); return; }
-  if (!card) {
-    card = document.createElement('div');
-    card.className = 'plan-card';
-    box.prepend(card);
-  }
-  const sig = plan.map(it => it.text).join('\u0001');
-  if (card.dataset.sig !== sig) {
-    card.dataset.sig = sig;
-    card.innerHTML = '<div class="plan-card-title">' + escapeHtml(T('plan.title')) + '</div><ul>'
-      + plan.map(it => '<li class="plan-item' + (it.done ? ' done' : '') + '"><span class="plan-text">'
-        + escapeHtml(it.text) + '</span></li>').join('')
-      + '</ul>';
+/* ---- plan drawer (裁决 17): the session's plan lives in a collapsible
+   right-edge sidebar (Spore drawer pattern), never in the transcript. A flip to
+   done strikes the item through with a growing bar (style.css), so a fresh
+   paint (all-done items) shows them struck and a live flip animates. Only a
+   user toggle persists the open/collapsed state (fungi-plan-open, like the
+   theme); auto-opens are momentary. ---- */
+const planDrawer = document.getElementById('plan-drawer');
+const planKnob = document.getElementById('plan-knob');
+const planList = document.getElementById('plan-list');
+const planCount = document.getElementById('plan-count');
+
+function planPrefOpen() {
+  try { return localStorage.getItem('fungi-plan-open') !== '0'; } catch (e) { return true; }
+}
+
+function setPlanOpen(open, persist) {
+  if (!planDrawer) return;
+  planDrawer.classList.toggle('open', open);
+  if (persist !== false) { try { localStorage.setItem('fungi-plan-open', open ? '1' : '0'); } catch (e) {} }
+}
+
+function renderPlan(plan, live) {
+  if (!planDrawer || !planList) return;
+  const items = plan || [];
+  const wasEmpty = planDrawer.classList.contains('empty');
+  planDrawer.classList.toggle('empty', !items.length);
+  if (!items.length) {
+    planDrawer.classList.remove('open');
+    planList.innerHTML = '';
+    delete planDrawer.dataset.sig;
     return;
   }
-  // Same list: only toggle done classes — the CSS width transition is the animation.
-  const items = card.querySelectorAll('.plan-item');
-  plan.forEach((it, i) => { if (items[i]) items[i].classList.toggle('done', !!it.done); });
+  // empty→non-empty: a load restores the stored preference; a live plan event
+  // (the agent just started planning) opens so it is seen, not just the knob.
+  if (wasEmpty) setPlanOpen(live ? true : planPrefOpen(), false);
+  const sig = items.map(it => it.text).join('\u0001');
+  if (planDrawer.dataset.sig !== sig) {
+    planDrawer.dataset.sig = sig;
+    planList.innerHTML = items.map(it => '<li class="plan-item' + (it.done ? ' done' : '') + '"><span class="plan-text">'
+      + escapeHtml(it.text) + '</span></li>').join('');
+  } else {
+    // Same list: only toggle done classes — the CSS width transition is the animation.
+    const rows = planList.querySelectorAll('.plan-item');
+    items.forEach((it, i) => { if (rows[i]) rows[i].classList.toggle('done', !!it.done); });
+  }
+  const left = items.filter(it => !it.done).length;
+  planCount.textContent = left ? String(left) : '\u2713';
+  planCount.classList.toggle('all-done', left === 0);
 }
+
+planKnob && planKnob.addEventListener('click', () => setPlanOpen(!planDrawer.classList.contains('open')));
+document.getElementById('plan-close')?.addEventListener('click', () => setPlanOpen(false));
 
 /* Timeline + transcript rendering live in common.js (FC.renderTranscript /
    FC.insertByTs): m.js is the same renderer with different cosmetics, and two
@@ -387,46 +415,18 @@ burger.textContent = document.getElementById('sidebar').classList.contains('coll
 document.getElementById('session-filter').addEventListener('input', renderSessionList);
 document.getElementById('btn-new-session').addEventListener('click', () => newSession());
 
-/* ---------- agent tray (bubbles while running) + replayable modal ---------- */
-const agents = {};         // live spec id -> {layer, goal, replyFormat, status, history, eventsEl}
-const specByCall = {};     // live tool_call id -> spec id
-let archived = {};         // persisted spec id -> same shape as live (history = events)
+/* ---------- agent tray + replayable modal ----------
+   M2b retired live spawns (spec §3.4): the server no longer emits
+   agent_spawn/agent_status/agent_event, so there are no live bubbles or status
+   flips any more. What stays is the read-only replay of the subagents records
+   persisted in OLD session files: registerArchived maps them, the spawn/
+   background tool cards deep-link here (attachSpawnClick -> openAgentModal). */
+const specByCall = {};     // live tool_call id -> spec id (no writer since M2b; kept for the lookup chain)
+let archived = {};         // persisted spec id -> {layer, tool, goal, replyFormat}
 const archivedByCall = {}; // persisted tool_call id -> spec id
 
-function agentBubble(id) {
-  const a = agents[id];
-  const b = document.createElement('div');
-  b.className = 'agent-bubble ' + (a.layer === 3 ? 'layer3' : '') + ' ' + a.status;
-  b.id = 'bubble-' + id;
-  b.title = (a.tool === 'background' ? 'Bg' : (a.layer === 3 ? 'L3' : 'L2')) + ': ' + a.goal;
-  b.innerHTML = (a.tool === 'background' ? 'Bg' : 'L' + a.layer) + '<span class="agent-status-dot"></span>';
-  b.addEventListener('click', () => openAgentModal(id));
-  S.inTray(b);
-  window.fungiMotion?.float?.(b);
-  return b;
-}
-function setAgentStatus(id, st) {
-  const a = agents[id];
-  if (!a) return;
-  a.status = st;
-  const b = document.getElementById('bubble-' + id);
-  if (b) {
-    b.classList.remove('running', 'done', 'failed');
-    b.classList.add(st);
-    if (st === 'done' || st === 'failed' || st === 'aborted') {
-      // bubbles are transient: only visible while the subagent runs
-      setTimeout(() => { b.remove(); }, 1500);
-    }
-  }
-  if (a.eventsEl) {
-    const label = {
-      done: T('agent.finished'), failed: T('agent.failed'), aborted: T('agent.stopped'),
-    }[st];
-    if (label) a.eventsEl.insertAdjacentHTML('beforeend', '<div class="ev final-ev">' + label + '</div>');
-  }
-}
 function agentEvent(id, ev) {
-  const a = agents[id] || archived[id];
+  const a = archived[id];
   if (!a || !a.eventsEl) return;
   const body = a.eventsEl;
   if (ev.type === 'text' || ev.type === 'reasoning') {
@@ -456,7 +456,7 @@ function agentEvent(id, ev) {
   }
 }
 function openAgentModal(id) {
-  const a = agents[id] || archived[id];
+  const a = archived[id];
   if (!a) return;
   const overlay = document.getElementById('agent-modal-overlay');
   overlay.innerHTML = '<div id="agent-modal">'
@@ -531,17 +531,25 @@ function requestStop() {
   }
 }
 
-/* 后台执行 (§74): background a long-running bash call the user won't wait for.
-   Parse the command off the tool card's raw args, tell the server to kill the
-   foreground call and re-dispatch it via the bg tool; the output returns later
-   as a [background report] re-activation (handled by the resume poll). */
+/* 后台执行 (§74 / 裁决 20): move a long-running bash call into the job table.
+   The POST only arms the session's detach signal — the running bash hands its
+   own process to the job table and returns BACKGROUNDED (job=…) as its tool
+   result, which is where the card learns the job id. So the response is just
+   {ok}: on ok the card is marked as moved over (chip in running state, id bound
+   when the result lands); the final output arrives later as a [job report]
+   turn, the chip only tracks status via the /jobs poll. */
 function backgroundTool(spec) {
-  let command = '', cwd = null;
-  try { const a = JSON.parse(spec.args || '{}'); command = a.command || ''; cwd = a.cwd || null; } catch (e) {}
-  if (!command) return;
   const sid = (turn && turn.sessionId) || currentSessionId;
+  if (!sid || !spec.id) return;
   fetch('/background-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId: sid, command, cwd }) }).catch(() => {});
+    body: JSON.stringify({ sessionId: sid }) })
+    .then(r => r.json())
+    .then(d => {
+      if (!d || !d.ok) return;
+      bgPending.add(spec.id); // job id unknown until the BACKGROUNDED result lands
+      syncJobChips();
+    })
+    .catch(() => {});
 }
 
 async function send() {
@@ -588,25 +596,111 @@ async function retryTurn() {
   if (currentSessionId === sid) input.focus();
 }
 
-/* Background subagent(s) finished: re-activate the session with a resume
-   turn whose server-injected input is their reports. Polled; a report that
-   lands while a turn runs is retried on a later tick (server 409s if busy). */
-async function resumeIfPending() {
-  if (processing || turn || !currentSessionId) return;
-  try {
-    const r = await fetch('/spawn-pending?sessionId=' + encodeURIComponent(currentSessionId));
-    const d = await r.json();
-    if (!d.pending) return;
-    processing = true;
-    abortCtrl = new AbortController(); stopRequested = false;
-    turn = { sessionId: currentSessionId, entries: [] };
-    sessionDirty = true;
-    setBusy(true);
-    setStatus(T('status.resuming'));
-    _liveCount = 0; window.fungiMotion?.waveOn?.(status);
-    renderTurnLive();
-    await pumpStream('/resume', { sessionId: currentSessionId });
-  } catch (e) {}
+/* ---------- 后台执行 → 作业状态芯片 (M2b, spec §3.4 裁决 20) ----------
+   A backgrounded bash call comes back as a tool result starting with
+   BACKGROUNDED (job=xxxxxxxx); the card keeps a status chip bound to that id.
+   State rides ONE 3 s /jobs poll for the open session (restarted per session
+   in setCurrentSession). /jobs carries no output — the final output arrives as
+   a [job report] turn, so the chip only ever shows status (+ exit code). */
+const JOB_RE = /job=([0-9a-f]{8})/;               // BACKGROUNDED (job=<8 hex>)
+const JOB_STATUS = ['running', 'done', 'failed', 'killed', 'interrupted'];
+const jobByCall = {};   // tool call id -> job id (from the card's own result text)
+const bgPending = new Set(); // call ids backgrounded but not yet bound to a job id
+const jobState = {};    // job id -> last /jobs row seen this page life
+const jobGone = new Set();  // transcript job ids the server table no longer knows
+let jobsPoll = null;    // the single interval handle
+
+function jobChipText(job) {
+  if (!job) return T('jobs.running');
+  const status = job.status || 'running';
+  if (!JOB_STATUS.includes(status)) return status;
+  const text = T('jobs.' + status);
+  return status === 'failed' && job.exitCode != null ? text + ' (exit ' + job.exitCode + ')' : text;
+}
+
+function paintJobChip(chip, jobId) {
+  const job = jobId ? jobState[jobId] : null;
+  chip.classList.toggle('running', !job || job.status === 'running');
+  let state = chip.querySelector('.job-state');
+  if (!state) {
+    state = document.createElement('b');
+    state.className = 'job-state';
+    chip.prepend(state);
+  }
+  state.textContent = jobChipText(job);
+  // Kill only for a job we can address and that is still running.
+  const killable = !!jobId && (!job || job.status === 'running');
+  const hasKill = !!chip.querySelector('.job-kill');
+  if (killable && !hasKill) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'job-kill';
+    btn.textContent = '\u2715';
+    btn.title = T('jobs.kill');
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      fetch('/jobs/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: jobId }) }).catch(() => {});
+    });
+    chip.appendChild(btn);
+  } else if (!killable && hasKill) {
+    chip.querySelector('.job-kill').remove();
+  }
+}
+
+/* Every tool card that carries a job id (its own result text live or from the
+   re-rendered transcript) wears a chip; a card backgrounded but not yet bound
+   wears one too, in running state. */
+function syncJobChips() {
+  if (!currentSessionId || !pane.is('session')) return;
+  S.el().querySelectorAll('.msg.tool').forEach(card => {
+    const callId = card.id && card.id.indexOf('tool-') === 0 ? card.id.slice(5) : '';
+    const out = card.querySelector('.tool-result');
+    const m = JOB_RE.exec(out ? out.textContent : '');
+    const jobId = m ? m[1] : ((callId && jobByCall[callId]) || '');
+    let chip = card.querySelector('.job-chip');
+    if (jobId && jobGone.has(jobId)) { if (chip) chip.remove(); return; }
+    if (!jobId && !(callId && bgPending.has(callId))) {
+      if (chip && !chip.dataset.job) chip.remove(); // detach lost the race: no job coming
+      return;
+    }
+    if (!chip) {
+      chip = document.createElement('span');
+      chip.className = 'job-chip';
+      card.appendChild(chip);
+    }
+    if (jobId) chip.dataset.job = jobId;
+    paintJobChip(chip, jobId);
+  });
+}
+
+function pollJobs() {
+  if (!currentSessionId || !pane.is('session')) return;
+  syncJobChips(); // place/bind first so this response has chips to paint
+  fetch('/jobs?sessionId=' + encodeURIComponent(currentSessionId))
+    .then(r => r.json())
+    .then(d => {
+      const list = (d && d.jobs) || [];
+      const ids = new Set(list.map(j => j.id));
+      list.forEach(j => { jobState[j.id] = j; });
+      S.el().querySelectorAll('.job-chip').forEach(chip => {
+        const jobId = chip.dataset.job || '';
+        if (!jobId) { paintJobChip(chip, ''); return; } // bgPending, id not bound yet
+        if (ids.has(jobId)) { jobGone.delete(jobId); paintJobChip(chip, jobId); }
+        else if (jobState[jobId]) paintJobChip(chip, jobId); // known final state
+        else { jobGone.add(jobId); chip.remove(); } // table has no such job (restart)
+      });
+    })
+    .catch(() => {});
+}
+
+/* One interval only: re-arming on every session open/close clears the old one,
+   so no session ever stacks a second poll. */
+function startJobsPoll() {
+  if (jobsPoll) { clearInterval(jobsPoll); jobsPoll = null; }
+  if (!currentSessionId) return;
+  jobsPoll = setInterval(pollJobs, 3000);
+  pollJobs();
 }
 
 /* A session's turn may still be running server-side (the client reloaded or
@@ -730,22 +824,15 @@ function handleTurnEvent(obj) {
       const rec = t.entries.find(x => x.kind === 'tool' && x.id === obj.content.id)
         || [...t.entries].reverse().find(x => x.kind === 'tool' && !x.result);
       if (rec) rec.result = obj.content.content;
+      // BACKGROUNDED (job=…): bind call -> job right away (M2b jobs chip). A
+      // result WITHOUT the marker means the detach lost the race (the call had
+      // finished first) — the pending mark goes either way, so no chip waits
+      // on a job that will never exist.
+      const jm = JOB_RE.exec(String(obj.content.content || ''));
+      const wasPending = bgPending.delete(obj.content.id);
+      if (jm) jobByCall[obj.content.id] = jm[1];
       if (visible) { setStatus(T('status.thinking')); const block = document.getElementById('tool-' + obj.content.id); if (block) FC.fillToolResult(block, obj.content.content); else renderTurnLive(); }
-      break;
-    }
-    case 'agent_spawn':
-      agents[obj.content.id] = {
-        layer: obj.content.layer, tool: obj.content.tool, goal: obj.content.goal,
-        replyFormat: obj.content.reply_format || '', status: 'running', history: [],
-      };
-      if (obj.content.call_id) specByCall[obj.content.call_id] = obj.content.id;
-      agentBubble(obj.content.id);
-      break;
-    case 'agent_status': setAgentStatus(obj.content.id, obj.content.status); break;
-    case 'agent_event': {
-      const aid = obj.content.id, ev = obj.content.event;
-      if (agents[aid]) agents[aid].history.push(ev);
-      agentEvent(aid, ev);
+      if (jm || wasPending) syncJobChips();
       break;
     }
     case 'ask':
@@ -766,9 +853,9 @@ function handleTurnEvent(obj) {
       if (!t.sessionId) t.sessionId = obj.content;
       break;
     case 'plan':
-      // 裁决 17: the plan card repaints in place; done flips strike through
+      // 裁决 17: the plan drawer repaints in place; done flips strike through
       // with the CSS sweep. The disk copy is re-read on the next full render.
-      if (visible) renderPlan(obj.content.plan || []);
+      if (visible) renderPlan(obj.content.plan || [], true);
       break;
     case 'done': {
       // A finished session turn may only repaint its own pane: with a friend
@@ -778,13 +865,8 @@ function handleTurnEvent(obj) {
       const failed = t.entries.length && t.entries[t.entries.length - 1].kind === 'error';
       turn = null; abortCtrl = null; stopRequested = false;
       if (stopTimer) { clearTimeout(stopTimer); stopTimer = null; }
-      if (t.aborted) {
-        // stop means stop: background subagents/commands were killed - their
-        // final agent_status events had no live stream to ride on
-        Object.keys(agents).forEach(id => {
-          if (agents[id].status === 'running') setAgentStatus(id, 'aborted');
-        });
-      }
+      // (Stop leaves jobs alone by design: a backgrounded bash lives in the job
+      // table, and its chip keeps tracking it from here.)
       // The line under the input is a progress readout, so the end of a turn has
       // to clear it: nothing else does, and a session that never wrote a word
       // (the transfer session: one row, no model — §53) left "Thinking..." on
@@ -871,6 +953,7 @@ function renderTurnLive() {
     }
   }
   _liveCount = _live.length;
+  syncJobChips(); // live tool cards are rebuilt on every repaint
 }
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
@@ -965,8 +1048,9 @@ const PendingAsks = FC.initPendingAsks({
 });
 const placeAskCards = PendingAsks.place, pollPendingAsks = PendingAsks.poll;
 setInterval(pollPendingAsks, 3000);
-setInterval(resumeIfPending, 3000);
-resumeIfPending();
+/* (the 3 s resume poll is gone with M2b: /spawn-pending and /resume were
+   removed. Job status rides the per-session /jobs poll started in
+   setCurrentSession instead.) */
 
 /* ---------- config modal ---------- */
 (async () => {

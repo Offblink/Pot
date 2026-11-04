@@ -6,14 +6,23 @@ import time
 
 import pytest
 
+from pot.agents import build_planner, build_role
+from pot.board import Board
 from pot.config import Config
 from pot.events import FnSink, NullSink
 from pot.llm import LLMResult
+from pot.roles import Role, RoleRepo
 from pot.tools import ask as ask_mod
 from pot.tools.ask import ASK_SCHEMA, make_ask_tool, resolve_ask
-from pot.trilayer import TriLayer
 
 CFG = Config(api_key="k", endpoint="e", model="m")
+
+
+@pytest.fixture
+def board(tmp_path) -> Board:
+    """A throwaway board: the ask tests never call a card tool, but the
+    builders bind them, so an instance must exist."""
+    return Board(tmp_path / "board.sqlite", RoleRepo(tmp_path / "roles"))
 
 
 class ScriptedLLM:
@@ -47,16 +56,15 @@ def first_ask(events: list, timeout: float = 5.0) -> dict:
     pytest.fail("ask event never emitted")
 
 
-def run_orchestrator(fake: ScriptedLLM, sink) -> list[dict]:
-    """Drive one L1 turn with the fake LLM; returns the mutated messages."""
-    tl = TriLayer(CFG, sink, llm=fake)
-    agent = tl.build_orchestrator(sink)
+def run_orchestrator(fake: ScriptedLLM, sink, board: Board) -> list[dict]:
+    """Drive one Planner turn with the fake LLM; returns the mutated messages."""
+    agent = build_planner(CFG, sink, board=board, llm=fake)
     messages = [{"role": "user", "content": "hi"}]
     agent.run(messages)
     return messages
 
 
-def test_confirm_returns_answer():
+def test_confirm_returns_answer(board):
     events: list = []
     sink = FnSink(lambda t, c: events.append((t, c)))
     fake = ScriptedLLM(
@@ -82,7 +90,7 @@ def test_confirm_returns_answer():
 
     thread = threading.Thread(target=resolver)
     thread.start()
-    messages = run_orchestrator(fake, sink)
+    messages = run_orchestrator(fake, sink, board)
     thread.join(5)
     assert not thread.is_alive()
 
@@ -100,7 +108,7 @@ def test_confirm_returns_answer():
     assert not ask_mod._pending
 
 
-def test_multi_question_numbered_answer():
+def test_multi_question_numbered_answer(board):
     events: list = []
     sink = FnSink(lambda t, c: events.append((t, c)))
     fake = ScriptedLLM(
@@ -128,7 +136,7 @@ def test_multi_question_numbered_answer():
 
     thread = threading.Thread(target=resolver)
     thread.start()
-    messages = run_orchestrator(fake, sink)
+    messages = run_orchestrator(fake, sink, board)
     thread.join(5)
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     assert tool_msgs[0]["content"] == "USER:\n1. YESIR\n2. 8799"
@@ -176,7 +184,7 @@ def test_ask_record_carries_its_tool_call_id():
     assert records[0]["call_id"] == "call-42"
 
 
-def test_timeout_recorded_with_timeout_status(monkeypatch):
+def test_timeout_recorded_with_timeout_status(monkeypatch, board):
     monkeypatch.setattr(ask_mod, "ASK_TIMEOUT_S", 0.05)
     events: list = []
     sink = FnSink(lambda t, c: events.append((t, c)))
@@ -186,14 +194,13 @@ def test_timeout_recorded_with_timeout_status(monkeypatch):
             LLMResult(content="算了"),
         ]
     )
-    tl = TriLayer(CFG, sink, llm=fake)
-    agent = tl.build_orchestrator(sink)
+    agent = build_planner(CFG, sink, board=board, llm=fake)
     messages = [{"role": "user", "content": "hi"}]
     agent.run(messages)
     tool_msgs = [m for m in messages if m.get("role") == "tool"]
     assert tool_msgs[0]["content"] == "ERROR: 用户未回答"
     assert ("ping", None) in events  # heartbeat kept the stream alive
-    assert tl.asks and tl.asks[0]["status"] == "timeout" and tl.asks[0]["answers"] is None
+    assert agent.asks and agent.asks[0]["status"] == "timeout" and agent.asks[0]["answers"] is None
     # timed-out ask cannot be resolved anymore
     ask_content = next(c for t, c in events if t == "ask")
     assert not resolve_ask(ask_content["id"], "太晚了")
@@ -270,29 +277,25 @@ def test_ask_wakes_on_abort():
     assert not ask_mod._pending
 
 
-def test_only_orchestrator_has_inquire():
-    """L1 tool table contains inquire; L2/L3 children never see it."""
-    events: list = []
-    sink = FnSink(lambda t, c: events.append((t, c)))
-    fake = ScriptedLLM(
-        [
-            LLMResult(
-                tool_calls=[
-                    tool_call(
-                        "spawn",
-                        {"goal": "g", "reply_format": "plain text"},
-                        call_id="c1",
-                    )
-                ]
-            ),
-            LLMResult(content="child done"),
-            LLMResult(content="parent done"),
-        ]
-    )
-    run_orchestrator(fake, sink)
+def test_only_planner_has_inquire(board):
+    """The Planner's table carries inquire + the board; a resident role gets
+    the board but never inquire — a role reports through cards, not asks."""
+    sink = FnSink(lambda _t, _c: None)
+    planner = build_planner(CFG, sink, board=board, llm=None)
+    planner_names = {d["function"]["name"] for d in planner.tool_defs}
+    assert "inquire" in planner_names
+    assert "pot_board_create" in planner_names
+    assert not planner_names & {"spawn", "background"}
 
-    assert "inquire" in fake.requested[0]
-    assert "spawn" in fake.requested[0]
-    # L2 child tool table: base tools + spawn, no inquire
-    assert "inquire" not in fake.requested[1]
-    assert "spawn" in fake.requested[1]
+    role_agent = build_role(
+        CFG,
+        sink,
+        role=Role(id="worker", name="W", mission="do things", tools=["shell"]),
+        session_id="s1",
+        board=board,
+        llm=None,
+    )
+    role_names = {d["function"]["name"] for d in role_agent.tool_defs}
+    assert "inquire" not in role_names
+    assert "pot_board_claim" in role_names and "pot_board_report" in role_names
+    assert not role_names & {"spawn", "background"}

@@ -175,14 +175,14 @@ def test_config_round_trip_preserves_mcp_servers(tmp_path: Path) -> None:
     assert load_config(path).mcp_servers == {}
 
 
-def test_config_round_trip_preserves_layer_models(tmp_path: Path) -> None:
+def test_retired_layer_models_key_is_ignored(tmp_path: Path) -> None:
+    """Per-layer model overrides died with the trilayer (spec §3.4). A config
+    still carrying the old `models` key must load clean, not crash."""
     path = tmp_path / "config.json"
-    cfg = Config(api_key="k", model="base", layer_models={1: "big", 3: "small"})
-    save_config(cfg, path)
+    path.write_text('{"models": {"1": "big", "9": "x"}, "api_key": "k"}', encoding="utf-8")
     loaded = load_config(path)
-    assert loaded.layer_models == {1: "big", 3: "small"}
-    assert loaded.model_for(1) == "big" and loaded.model_for(3) == "small"
-    assert loaded.model_for(2) == "base"  # layers without an entry fall back
-    # Non-layer keys and empty values are dropped, not crash.
-    path.write_text('{"models": {"9": "x", "2": ""}, "api_key": "k"}', encoding="utf-8")
-    assert load_config(path).layer_models == {}
+    assert loaded.api_key == "k"
+    assert not hasattr(loaded, "layer_models")
+    # And a modern config round-trips without inventing the key back.
+    save_config(loaded, path)
+    assert "models" not in path.read_text(encoding="utf-8")

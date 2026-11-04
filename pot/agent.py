@@ -202,8 +202,8 @@ def _repair_tool_json(text: str) -> dict | None:
 class Agent:
     """One agent conversation loop. Owns no history: the caller passes the message list.
 
-    `extra_tools` (BoundTool by name) lets upper layers attach dispatch/ask
-    tools (see pot.trilayer / pot.tools.ask). `llm` is injectable so tests
+    `extra_tools` (BoundTool by name) lets the builder attach board/ask
+    tools (see pot.agents / pot.tools.ask). `llm` is injectable so tests
     can drive the loop with scripted completions.
     """
 
@@ -247,7 +247,7 @@ class Agent:
             raise LLMAbortedError(LLMResult())
         model = self.model or self.cfg.model
         # Which endpoint+key to talk to (spec §68): a name we have learned a pairing
-        # for carries it here too, so a per-layer override (trilayer) may sit on
+        # for carries it here too, so a per-agent model override may sit on
         # another vendor without the whole session having to move.
         endpoint, api_key = provider_for(self.cfg, model) or (self.cfg.endpoint, self.cfg.api_key)
         result = stream_chat(
@@ -286,7 +286,10 @@ class Agent:
             # the loop would lose the pixels a bound tool attached (screen shots).
             return result if isinstance(result, str) else str(result)
         return tools.dispatch(
-            name, args, should_abort=lambda: self._aborted() or self._tool_stopped()
+            name,
+            args,
+            should_abort=self._aborted,
+            should_detach=self._tool_stopped,  # 后台执行 → bash hands off to the job table
         )
 
     def _run_tool_call(self, tc: dict, messages: list[dict]) -> None:
@@ -318,18 +321,11 @@ class Agent:
         else:
             output = self._dispatch(name, args, call_id=tc["id"])
             if self._tool_stopped():
-                # 后台执行: the user moved this bash call to the background. It is
-                # NOT a stop — the bg tool is running it out-of-band and its output
-                # arrives later as a [background report]. Tell the agent plainly so
-                # it continues the turn instead of treating this as an abort.
-                if str(output).startswith("ERROR: cancelled by user"):
-                    output = (
-                        "BACKGROUNDED: the user moved this command to the background at"
-                        " their request. It keeps running out-of-band; its output will"
-                        " arrive later as a [background report] new turn. Do NOT re-run"
-                        " it — continue with anything else the task needs, or end your turn."
-                    )
-                self.tool_abort_event.clear()  # only this one call was backgrounded
+                # 后台执行 (裁决 20): the event served its one call — bash handed
+                # its process to the job table and said so itself; if the call had
+                # already finished, the press was stale. Either way clear it so
+                # the next tool call is unaffected.
+                self.tool_abort_event.clear()
         if not private:
             self.sink.emit("tool_result", {"content": _truncate(output), "id": tc["id"]})
         messages.append(

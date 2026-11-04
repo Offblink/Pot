@@ -1,8 +1,8 @@
-"""Tool registry: OpenAI function-calling schemas, dispatch, and per-layer whitelists.
+"""Tool registry: OpenAI function-calling schemas and dispatch.
 
-Layer rules (see docs/spec.md 2.3):
-- L1/L2: all base tools; `spawn` and `inquire` are attached by pot.trilayer / pot.tools.ask.
-- L3:   read/write/edit/glob/grep/bash only (basic worker, no web, no dispatch).
+Whitelists: a role's tool surface comes from its definition (pot.agents
+resolve_tool_names); `inquire` / `todo` / `pot_board_*` attach as BoundTools
+per builder (pot.agents).
 """
 
 import inspect
@@ -177,7 +177,6 @@ TOOLS: dict[str, dict] = {
 }
 
 BASE_TOOL_NAMES = frozenset(TOOLS)
-L3_TOOL_NAMES = frozenset({"read", "write", "edit", "glob", "grep", "bash"})
 
 
 def tool_defs(names: frozenset[str] | set[str] | None = None) -> list[dict]:
@@ -186,7 +185,12 @@ def tool_defs(names: frozenset[str] | set[str] | None = None) -> list[dict]:
     return [TOOLS[name]["schema"] for name in TOOLS if name in selected]
 
 
-def dispatch(name: str, args: dict, should_abort: Callable[[], bool] | None = None) -> str:
+def dispatch(
+    name: str,
+    args: dict,
+    should_abort: Callable[[], bool] | None = None,
+    should_detach: Callable[[], bool] | None = None,
+) -> str:
     tool = TOOLS.get(name)
     if tool is None:
         return f"ERROR: Unknown tool: {name}"
@@ -196,9 +200,12 @@ def dispatch(name: str, args: dict, should_abort: Callable[[], bool] | None = No
     accepted = inspect.signature(tool["fn"]).parameters
     kwargs = {k: v for k, v in args.items() if k in accepted}
     # cooperative cancellation: tools that declare `should_abort` (long-running
-    # ones like video) get the agent's abort predicate injected automatically
+    # ones like video) get the agent's abort predicate injected automatically;
+    # `should_detach` is the 后台执行 hand-off (bash only, 裁决 20).
     if should_abort is not None and "should_abort" in accepted:
         kwargs["should_abort"] = should_abort
+    if should_detach is not None and "should_detach" in accepted:
+        kwargs["should_detach"] = should_detach
     try:
         result = tool["fn"](**kwargs)
     except (OSError, ValueError, TypeError) as exc:
