@@ -32,7 +32,7 @@
 
 ```powershell
 # 1. 依赖
-git clone <this repo> pot; cd pot
+git clone https://github.com/Offblink/Pot.git pot; cd pot
 pip install -e .
 
 # 2. 起宿主（人肉用它就够了：WebUI + hub 一起起来）
