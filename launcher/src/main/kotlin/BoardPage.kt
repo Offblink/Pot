@@ -2,7 +2,6 @@ package pot.launcher
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -44,14 +42,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONObject
 
+/** (status, Chinese, English) — the label is resolved at paint time, not once at load. */
 private val COLUMNS =
     listOf(
-        "backlog" to "待规划",
-        "todo" to "待办",
-        "doing" to "进行中",
-        "review" to "待验收",
-        "done" to "已完成",
-        "blocked" to "受阻",
+        Triple("backlog", "待规划", "Backlog"),
+        Triple("todo", "待办", "To do"),
+        Triple("doing", "进行中", "Doing"),
+        Triple("review", "待验收", "Review"),
+        Triple("done", "已完成", "Done"),
+        Triple("blocked", "受阻", "Blocked"),
     )
 
 private val PRIORITIES = listOf("urgent", "normal", "low")
@@ -72,12 +71,19 @@ fun BoardPage(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            TabPill("看板", tab == 0) { tab = 0 }
-            TabPill("角色", tab == 1) { tab = 1 }
+            TabPill(Strings.t("看板", "Board"), tab == 0) { tab = 0 }
+            TabPill(Strings.t("角色", "Roles"), tab == 1) { tab = 1 }
             Spacer(Modifier.weight(1f))
-            Muted("${state.cards.count { !it.optBoolean("deleted") }} 张卡")
+            Muted(
+                if (Strings.lang == Lang.EN) {
+                    val n = state.cards.count { !it.optBoolean("deleted") }
+                    if (n == 1) "1 card" else "$n cards"
+                } else {
+                    "${state.cards.count { !it.optBoolean("deleted") }} 张卡"
+                },
+            )
             Button(onClick = { showCreate = true }, enabled = state.host.status == HostStatus.RUNNING) {
-                Text("＋ 新建卡")
+                Text(Strings.t("＋ 新建卡", "+ New card"))
             }
         }
         if (tab == 0) {
@@ -122,7 +128,7 @@ private fun BoardColumns(state: PotState) {
         Modifier.fillMaxSize().padding(horizontal = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        COLUMNS.forEach { (status, label) ->
+        COLUMNS.forEach { (status, zh, en) ->
             val cards = state.cards.filter { it.optString("status") == status && !it.optBoolean("deleted") }
             Column(
                 // Equal shares, no horizontal scroll: this box runs at 150% DPI,
@@ -139,7 +145,12 @@ private fun BoardColumns(state: PotState) {
                             .background(statusColor(status), RoundedCornerShape(2.dp)),
                     )
                     Spacer(Modifier.width(6.dp))
-                    Text(label, color = statusColor(status), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                    Text(
+                        Strings.t(zh, en),
+                        color = statusColor(status),
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
                     Spacer(Modifier.weight(1f))
                     Muted("${cards.size}")
                 }
@@ -213,11 +224,11 @@ private fun BoardCard(
             }
             if (holder != null) {
                 Spacer(Modifier.height(4.dp))
-                Muted("持有：" + holder.substringBefore(":"))
+                Muted(Strings.t("持有：", "Held by: ") + holder.substringBefore(":"))
             }
             if (status == "doing" && leaseLeft > 0) {
                 Spacer(Modifier.height(2.dp))
-                Muted("租约 " + "%d:%02d".format(leaseLeft / 60, leaseLeft % 60))
+                Muted(Strings.t("租约 ", "lease ") + "%d:%02d".format(leaseLeft / 60, leaseLeft % 60))
             }
             if (status == "review" && report != null) {
                 Spacer(Modifier.height(5.dp))
@@ -234,11 +245,11 @@ private fun BoardCard(
                 if (status != "done") {
                     Box {
                         TextButton(onClick = { assignOpen = true }, contentPadding = CardPadding) {
-                            Text("改派", fontSize = 11.sp, color = p.muted)
+                            Text(Strings.t("改派", "Reassign"), fontSize = 11.sp, color = p.muted)
                         }
                         DropdownMenu(expanded = assignOpen, onDismissRequest = { assignOpen = false }) {
                             DropdownMenuItem(
-                                text = { Text("不限（任何角色）") },
+                                text = { Text(Strings.t("不限（任何角色）", "Anyone (any role)")) },
                                 onClick = {
                                     assignOpen = false
                                     state.assign(card, null)
@@ -262,12 +273,12 @@ private fun BoardCard(
                             onClick = { state.complete(card) },
                             contentPadding = CardPadding,
                             colors = ButtonDefaults.buttonColors(containerColor = p.primary, contentColor = p.onPrimary),
-                        ) { Text("✓ 完成", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                        ) { Text(Strings.t("✓ 完成", "✓ Done"), fontSize = 11.sp, fontWeight = FontWeight.Bold) }
                         RejectButton { showReject = true }
                     }
                     "doing" -> {
                         TextButton(onClick = { state.renew(card) }, contentPadding = CardPadding) {
-                            Text("续租", fontSize = 11.sp, color = p.muted)
+                            Text(Strings.t("续租", "Renew"), fontSize = 11.sp, color = p.muted)
                         }
                         RejectButton { showReject = true }
                     }
@@ -276,7 +287,7 @@ private fun BoardCard(
                 if (status != "done") {
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = { showDelete = true }, contentPadding = CardPadding) {
-                        Text("删除", fontSize = 11.sp, color = p.muted)
+                        Text(Strings.t("删除", "Delete"), fontSize = 11.sp, color = p.muted)
                     }
                 }
             }
@@ -289,26 +300,38 @@ private fun BoardCard(
     if (showDelete) {
         AlertDialog(
             onDismissRequest = { showDelete = false },
-            title = { Text("删除卡片") },
-            text = { Text("「${card.optString("title")}」将被软删（不可从 UI 恢复）。") },
+            title = { Text(Strings.t("删除卡片", "Delete card")) },
+            text = {
+                Text(
+                    Strings.t(
+                        "「${card.optString("title")}」将被软删（不可从 UI 恢复）。",
+                        "“${card.optString("title")}” will be soft-deleted (it cannot be restored from the UI).",
+                    ),
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     showDelete = false
                     state.deleteCard(card)
-                }) { Text("删除", color = p.error) }
+                }) { Text(Strings.t("删除", "Delete"), color = p.error) }
             },
-            dismissButton = { TextButton(onClick = { showDelete = false }) { Text("取消") } },
+            dismissButton = {
+                TextButton(onClick = { showDelete = false }) { Text(Strings.t("取消", "Cancel")) }
+            },
         )
     }
 }
 
 private val CardPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 2.dp)
 
+/** The role table's action column: fixed, so Edit/Del never get squeezed. */
+private val ActionsWidth = 112.dp
+
 @Composable
 private fun RejectButton(onClick: () -> Unit) {
     val p = pal
     TextButton(onClick = onClick, contentPadding = CardPadding) {
-        Text("✗ 退回", fontSize = 11.sp, color = p.error)
+        Text(Strings.t("✗ 退回", "✗ Reject"), fontSize = 11.sp, color = p.error)
     }
 }
 
@@ -321,16 +344,21 @@ private fun RejectDialog(
     var reason by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("退回卡片") },
+        title = { Text(Strings.t("退回卡片", "Reject card")) },
         text = {
             Column {
-                Muted("退回原因会写进卡片评论，角色开工前必读。")
+                Muted(
+                    Strings.t(
+                        "退回原因会写进卡片评论，角色开工前必读。",
+                        "The reason goes into the card's comments — roles read it before starting.",
+                    ),
+                )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = reason,
                     onValueChange = { reason = it },
                     minLines = 2,
-                    placeholder = { Text("例如：缺测试") },
+                    placeholder = { Text(Strings.t("例如：缺测试", "e.g. missing tests")) },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -339,11 +367,13 @@ private fun RejectDialog(
             TextButton(
                 onClick = {
                     onClose()
-                    state.reject(card, reason.ifBlank { "（未填原因）" })
+                    state.reject(card, reason.ifBlank { Strings.t("（未填原因）", "(no reason given)") })
                 },
-            ) { Text("退回") }
+            ) { Text(Strings.t("退回", "Reject")) }
         },
-        dismissButton = { TextButton(onClick = onClose) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onClose) { Text(Strings.t("取消", "Cancel")) }
+        },
     )
 }
 
@@ -362,13 +392,13 @@ private fun CreateCardDialog(
 
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text("新建卡片") },
+        title = { Text(Strings.t("新建卡片", "New card")) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("标题（目标）") },
+                    label = { Text(Strings.t("标题（目标）", "Title (the goal)")) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -376,7 +406,19 @@ private fun CreateCardDialog(
                 OutlinedTextField(
                     value = desc,
                     onValueChange = { desc = it },
-                    label = { Text("目标 + 回复格式 + 约束（卡片必须自足）") },
+                    label = { Text(Strings.t("目标 + 回复格式 + 约束", "Goal + reply format + constraints")) },
+                    // The bracket used to sit INSIDE the label and wrapped mid-way
+                    // ("web=" / "网络 …"), user report 2026-11-04 — a hint belongs
+                    // under the box, where it wraps as a line of its own.
+                    supportingText = {
+                        Text(
+                            Strings.t(
+                                "卡片必须自足：角色只看这张卡",
+                                "The card must stand alone: a role sees only this card",
+                            ),
+                            fontSize = 10.sp,
+                        )
+                    },
                     minLines = 3,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -384,14 +426,25 @@ private fun CreateCardDialog(
                 OutlinedTextField(
                     value = labels,
                     onValueChange = { labels = it },
-                    label = { Text("标签（逗号分隔；需在角色的可认领范围内）") },
+                    label = { Text(Strings.t("标签", "Labels")) },
+                    supportingText = {
+                        Text(
+                            Strings.t(
+                                "逗号分隔；需在角色的可认领范围内",
+                                "Comma-separated; must fall inside the role's claimable labels",
+                            ),
+                            fontSize = 10.sp,
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Box {
-                        OutlinedButton(onClick = { priorityOpen = true }) { Text("优先级：" + priorityLabel(priority)) }
+                        OutlinedButton(onClick = { priorityOpen = true }) {
+                            Text(Strings.t("优先级：", "Priority: ") + priorityLabel(priority))
+                        }
                         DropdownMenu(expanded = priorityOpen, onDismissRequest = { priorityOpen = false }) {
                             PRIORITIES.forEach {
                                 DropdownMenuItem(text = { Text(priorityLabel(it)) }, onClick = {
@@ -402,9 +455,11 @@ private fun CreateCardDialog(
                         }
                     }
                     Box {
-                        OutlinedButton(onClick = { roleOpen = true }) { Text("角色：" + (role ?: "不限")) }
+                        OutlinedButton(onClick = { roleOpen = true }) {
+                            Text(Strings.t("角色：", "Role: ") + (role ?: Strings.t("不限", "any")))
+                        }
                         DropdownMenu(expanded = roleOpen, onDismissRequest = { roleOpen = false }) {
-                            DropdownMenuItem(text = { Text("不限") }, onClick = {
+                            DropdownMenuItem(text = { Text(Strings.t("不限", "any")) }, onClick = {
                                 role = null
                                 roleOpen = false
                             })
@@ -432,9 +487,11 @@ private fun CreateCardDialog(
                         role,
                     )
                 },
-            ) { Text("建卡") }
+            ) { Text(Strings.t("建卡", "Create")) }
         },
-        dismissButton = { TextButton(onClick = onClose) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onClose) { Text(Strings.t("取消", "Cancel")) }
+        },
     )
 }
 
@@ -450,15 +507,41 @@ private fun RolesPanel(state: PotState) {
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Spacer(Modifier.weight(1f))
-            Button(onClick = { creating = true }) { Text("＋ 新建角色") }
+            Button(onClick = { creating = true }) { Text(Strings.t("＋ 新建角色", "+ New role")) }
         }
         Spacer(Modifier.height(8.dp))
+        // Weighted columns, not fixed dp (2026-11-04): the English headers are wider
+        // than the Chinese ones and `can create` / `template` ran into each other at
+        // 940dp. Weights share the row in both languages and at any window size.
+        val widths =
+            listOf(0.95f, 1.05f, 1.6f, 0.3f, 1.05f, 0.8f, 0.95f, 0.7f)
+        val headers =
+            listOf(
+                Strings.t("标识", "id"),
+                Strings.t("名称", "name"),
+                Strings.t("工具", "tools"),
+                Strings.t("并行", "wip"),
+                Strings.t("可认领", "claims"),
+                Strings.t("可建卡", "creates"),
+                Strings.t("模板", "template"),
+                Strings.t("创建者", "author"),
+                "",
+            )
         Row(
             Modifier.fillMaxWidth().padding(vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            listOf("标识" to 120, "名称" to 130, "工具" to 190, "并行" to 40, "可认领" to 150, "可建卡" to 60, "模板" to 110, "创建者" to 70, "" to 90)
-                .forEach { (label, w) -> Text(label, Modifier.width(w.dp), color = p.muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace) }
+            headers.forEachIndexed { i, label ->
+                Text(
+                    label,
+                    if (i < widths.size) Modifier.weight(widths[i]) else Modifier.width(ActionsWidth),
+                    color = p.muted,
+                    fontSize = 10.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             state.roles.forEach { role ->
@@ -468,28 +551,74 @@ private fun RolesPanel(state: PotState) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(role.optString("id"), Modifier.width(120.dp), color = p.fg, fontSize = 12.sp)
-                    Text(role.optString("name"), Modifier.width(130.dp), color = p.fg, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        role.optString("id"),
+                        Modifier.weight(widths[0]),
+                        color = p.fg,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        role.optString("name"),
+                        Modifier.weight(widths[1]),
+                        color = p.fg,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     Text(
                         toolsText(role),
-                        Modifier.width(190.dp),
+                        Modifier.weight(widths[2]),
                         color = p.muted,
                         fontSize = 11.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Text("${role.optInt("wip", 0)}", Modifier.width(40.dp), color = p.muted, fontSize = 11.sp)
-                    Text(canClaimText(role), Modifier.width(150.dp), color = p.muted, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(if (role.optBoolean("canCreateCard")) "✓" else "—", Modifier.width(60.dp), color = p.muted, fontSize = 11.sp)
-                    Text(role.optString("template"), Modifier.width(110.dp), color = p.muted, fontSize = 11.sp)
-                    Text(creatorText(role), Modifier.width(70.dp), color = p.muted, fontSize = 11.sp)
-                    Row(Modifier.width(90.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { editing = role }, contentPadding = CardPadding) { Text("编辑", fontSize = 11.sp) }
+                    Text("${role.optInt("wip", 0)}", Modifier.weight(widths[3]), color = p.muted, fontSize = 11.sp)
+                    Text(
+                        canClaimText(role),
+                        Modifier.weight(widths[4]),
+                        color = p.muted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        if (role.optBoolean("canCreateCard")) "✓" else "—",
+                        Modifier.weight(widths[5]),
+                        color = p.muted,
+                        fontSize = 11.sp,
+                    )
+                    // A template role IS the template; a derived one names its base.
+                    if (isTemplate) {
+                        Box(Modifier.weight(widths[6])) { Chip(Strings.t("模板", "template"), p.tertiary) }
+                    } else {
+                        Text(
+                            role.optString("template"),
+                            Modifier.weight(widths[6]),
+                            color = p.muted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Text(
+                        creatorText(role),
+                        Modifier.weight(widths[7]),
+                        color = p.muted,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Row(Modifier.width(ActionsWidth), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { editing = role }, contentPadding = CardPadding) {
+                            Text(Strings.t("编辑", "Edit"), fontSize = 11.sp)
+                        }
                         TextButton(onClick = { deleting = role }, contentPadding = CardPadding) {
-                            Text("删", fontSize = 11.sp, color = p.error)
+                            Text(Strings.t("删", "Del"), fontSize = 11.sp, color = p.error)
                         }
                     }
-                    if (isTemplate) Chip("模板", p.tertiary)
                 }
             }
         }
@@ -504,16 +633,26 @@ private fun RolesPanel(state: PotState) {
     deleting?.let { role ->
         AlertDialog(
             onDismissRequest = { deleting = null },
-            title = { Text("删除角色") },
-            text = { Text("删除「${role.optString("id")}」？已有会话保留（只读），但该角色不能再认领。") },
+            title = { Text(Strings.t("删除角色", "Delete role")) },
+            text = {
+                Text(
+                    Strings.t(
+                        "删除「${role.optString("id")}」？已有会话保留（只读），但该角色不能再认领。",
+                        "Delete “${role.optString("id")}”? Existing sessions are kept (read-only), " +
+                            "but the role can no longer claim cards.",
+                    ),
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     val id = role.optString("id")
                     deleting = null
                     state.deleteRole(id)
-                }) { Text("删除", color = p.error) }
+                }) { Text(Strings.t("删除", "Delete"), color = p.error) }
             },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text(Strings.t("取消", "Cancel")) }
+            },
         )
     }
 }
@@ -521,43 +660,46 @@ private fun RolesPanel(state: PotState) {
 /** One string of an array of strings, or "" — JSONObject.optString on arrays is useless. */
 private fun org.json.JSONArray.joinStrings(): String = (0 until length()).joinToString(",") { optString(it) }
 
-/** Tool-group ids → the Chinese words the table shows (unknown ids pass through). */
-private val TOOL_LABELS =
-    mapOf(
-        "shell" to "终端",
-        "files" to "文件",
-        "search" to "搜索",
-        "web" to "网络",
-        "screen" to "桌面",
-    )
+/** Tool-group ids → the words the table shows (unknown ids pass through). */
+private fun toolLabel(id: String): String =
+    when (id) {
+        "shell" -> Strings.t("终端", "shell")
+        "files" -> Strings.t("文件", "files")
+        "search" -> Strings.t("搜索", "search")
+        "web" -> Strings.t("网络", "web")
+        "screen" -> Strings.t("桌面", "screen")
+        else -> id
+    }
 
 private fun toolsText(role: JSONObject): String {
     val arr = role.optJSONArray("tools") ?: return ""
     return (0 until arr.length())
-        .map { TOOL_LABELS[arr.optString(it)] ?: arr.optString(it) }
-        .joinToString("，")
+        .map { toolLabel(arr.optString(it)) }
+        .joinToString(Strings.t("，", ", "))
 }
 
 private fun creatorText(role: JSONObject): String =
     when (role.optString("createdBy")) {
-        "human" -> "人"
+        "human" -> Strings.t("人", "human")
         "planner" -> "Planner"
         else -> role.optString("createdBy")
     }
 
 private fun priorityLabel(p: String): String =
     when (p) {
-        "urgent" -> "紧急"
-        "normal" -> "普通"
-        "low" -> "低"
+        "urgent" -> Strings.t("紧急", "urgent")
+        "normal" -> Strings.t("普通", "normal")
+        "low" -> Strings.t("低", "low")
         else -> p
     }
 
 private fun canClaimText(role: JSONObject): String =
     when {
         role.isNull("canClaim") -> ""
-        role.optBoolean("canClaim", false) && role.opt("canClaim") is Boolean -> if (role.optBoolean("canClaim")) "全部" else "禁止"
-        else -> role.optJSONArray("canClaim")?.joinStrings()?.ifEmpty { "全部" } ?: ""
+        role.optBoolean("canClaim", false) && role.opt("canClaim") is Boolean ->
+            if (role.optBoolean("canClaim")) Strings.t("全部", "all") else Strings.t("禁止", "none")
+        else ->
+            role.optJSONArray("canClaim")?.joinStrings()?.ifEmpty { Strings.t("全部", "all") } ?: ""
     }
 
 @Composable
@@ -581,37 +723,111 @@ private fun RoleEditor(
 
     AlertDialog(
         onDismissRequest = onClose,
-        title = { Text(if (isNew) "新建角色" else "编辑角色 ${existing?.optString("id")}") },
+        title = {
+            Text(
+                if (isNew) {
+                    Strings.t("新建角色", "New role")
+                } else {
+                    Strings.t("编辑角色 ", "Edit role ") + existing?.optString("id")
+                },
+            )
+        },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 if (isNew) {
-                    OutlinedTextField(id, { id = it }, label = { Text("id（小写字母/数字/下划线）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        id,
+                        { id = it },
+                        label = {
+                            Text(Strings.t("id（小写字母/数字/下划线）", "id (lowercase letters / digits / _)"))
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Spacer(Modifier.height(6.dp))
                 }
-                OutlinedTextField(name, { name = it }, label = { Text("名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    name,
+                    { name = it },
+                    label = { Text(Strings.t("名称", "Name")) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Spacer(Modifier.height(6.dp))
-                OutlinedTextField(mission, { mission = it }, label = { Text("使命（写进系统提示词）") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    mission,
+                    { mission = it },
+                    label = { Text(Strings.t("使命（写进系统提示词）", "Mission (goes into the system prompt)")) },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Spacer(Modifier.height(6.dp))
-                OutlinedTextField(tools, { tools = it }, label = { Text("工具（shell=终端 files=文件 search=搜索 web=网络 screen=桌面）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                // The legend lived in the label and wrapped mid-token
+                // ("web=" / "网络 …"): it belongs under the box.
+                OutlinedTextField(
+                    tools,
+                    { tools = it },
+                    label = { Text(Strings.t("工具", "Tools")) },
+                    supportingText = {
+                        Text(
+                            Strings.t(
+                                "shell=终端 files=文件 search=搜索 web=网络 screen=桌面",
+                                "shell, files, search, web, screen",
+                            ),
+                            fontSize = 10.sp,
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(wip, { wip = it.filter(Char::isDigit) }, label = { Text("并行") }, singleLine = true, modifier = Modifier.width(90.dp))
-                    OutlinedTextField(model, { model = it }, label = { Text("模型（空=跟随全局）") }, singleLine = true, modifier = Modifier.weight(1f))
+                    OutlinedTextField(
+                        wip,
+                        { wip = it.filter(Char::isDigit) },
+                        label = { Text(Strings.t("并行", "WIP")) },
+                        singleLine = true,
+                        modifier = Modifier.width(90.dp),
+                    )
+                    OutlinedTextField(
+                        model,
+                        { model = it },
+                        label = { Text(Strings.t("模型（空=跟随全局）", "Model (blank = global)")) },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
                 Spacer(Modifier.height(6.dp))
-                OutlinedTextField(canClaim, { canClaim = it }, label = { Text("可认领（标签逗号分隔；空=全部；false=禁止认领）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    canClaim,
+                    { canClaim = it },
+                    label = { Text(Strings.t("可认领", "Can claim")) },
+                    supportingText = {
+                        Text(
+                            Strings.t(
+                                "标签逗号分隔；空=全部；false=禁止认领",
+                                "Comma-separated labels; blank = all; false = none",
+                            ),
+                            fontSize = 10.sp,
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(canCreateCard, { canCreateCard = it })
-                    Text("可建卡", fontSize = 12.sp)
+                    Text(Strings.t("可建卡", "Can create cards"), fontSize = 12.sp)
                     Spacer(Modifier.width(12.dp))
                     Checkbox(isTemplate, { isTemplate = it })
-                    Text("模板", fontSize = 12.sp)
+                    Text(Strings.t("模板", "Template"), fontSize = 12.sp)
                 }
                 Box {
-                    OutlinedButton(onClick = { templateOpen = true }) { Text("template：" + template.ifEmpty { "（无）" }) }
+                    OutlinedButton(onClick = { templateOpen = true }) {
+                        Text("template：" + template.ifEmpty { Strings.t("（无）", "(none)") })
+                    }
                     DropdownMenu(expanded = templateOpen, onDismissRequest = { templateOpen = false }) {
-                        DropdownMenuItem(text = { Text("（无）") }, onClick = {
+                        DropdownMenuItem(text = { Text(Strings.t("（无）", "(none)")) }, onClick = {
                             template = ""
                             templateOpen = false
                         })
@@ -648,9 +864,13 @@ private fun RoleEditor(
                         state.updateRole(existing!!.optString("id"), fields)
                     }
                 },
-            ) { Text(if (isNew) "创建" else "保存") }
+            ) {
+                Text(if (isNew) Strings.t("创建", "Create") else Strings.t("保存", "Save"))
+            }
         },
-        dismissButton = { TextButton(onClick = onClose) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onClose) { Text(Strings.t("取消", "Cancel")) }
+        },
     )
 }
 

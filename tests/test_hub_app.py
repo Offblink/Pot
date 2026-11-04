@@ -229,3 +229,34 @@ def test_roles_crud_via_api(launcher):
     assert code == 200
     code, out = _get(launcher, "/api/roles")
     assert "doc" not in {r["id"] for r in out["roles"]}
+
+
+def test_language_switch_writes_what_lang_js_serves(launcher):
+    """spec §74: one switch, both halves — the launcher posts the language and the
+    host (the file's only writer) puts it in config.json, which /lang.js re-reads
+    on every request. status reports it back so the launcher can skip the write."""
+    from pot import config as config_mod
+
+    assert _get(launcher, "/api/host/status")[1]["ui_lang"] == "zh"  # the default
+
+    code, out = _post(launcher, "/api/host/lang", {"lang": "en"})
+    assert code == 200 and out["ui_lang"] == "en"
+    assert config_mod.load_config().ui_lang == "en"
+    written = json.loads(config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+    assert written["ui_lang"] == "en"
+    assert _get(launcher, "/api/host/status")[1]["ui_lang"] == "en"
+
+    # Back to Chinese: the key leaves the file (zh is the default, config.py) and
+    # the rest of the config is still there — the route must not blank the file.
+    assert _post(launcher, "/api/host/lang", {"lang": "zh"})[0] == 200
+    written = json.loads(config_mod.CONFIG_PATH.read_text(encoding="utf-8"))
+    assert "ui_lang" not in written
+    assert written["api_key"] == "k"
+
+
+def test_language_switch_rejects_an_unknown_code(launcher):
+    from pot import config as config_mod
+
+    code, out = _post(launcher, "/api/host/lang", {"lang": "fr"})
+    assert code == 400 and "error" in out
+    assert config_mod.load_config().ui_lang == "zh"

@@ -56,6 +56,30 @@ class PotState(
         scope.launch { runCatching { model = host.webuiGet("/model") } }
     }
 
+    /** Last language code this process wrote; `null` = never written. */
+    private var pushedLang: String? = null
+
+    /**
+     * Hand the launcher's language to the host, which owns config.json (and its
+     * lock) — `ui_lang` is what /lang.js serves to the WebUI, so this is the other
+     * half of the one switch.
+     *
+     * The skip is decided by what WE wrote, not only by the polled status: `info`
+     * lags up to one poll interval, and a flip-and-flip-back inside that window
+     * would otherwise read the stale value and leave config.json on the first
+     * language. With nothing written yet, the host's own value is the truth, so
+     * starting a host whose config already matches is not a write.
+     */
+    fun pushLang(code: String) {
+        if (host.status != HostStatus.RUNNING) return
+        val hostCode = host.info?.optString("ui_lang")
+        if (code == pushedLang || (pushedLang == null && hostCode == code)) return
+        act {
+            host.hubPost("/api/host/lang", JSONObject().put("lang", code))
+            pushedLang = code
+        }
+    }
+
     private fun act(block: suspend () -> Unit) {
         scope.launch {
             try {
@@ -63,7 +87,7 @@ class PotState(
             } catch (e: ApiError) {
                 toast("${e.code}: ${e.message}")
             } catch (e: Exception) {
-                toast(e.message ?: "出错了")
+                toast(e.message ?: Strings.t("出错了", "Something went wrong"))
             }
             refreshBoard()
         }

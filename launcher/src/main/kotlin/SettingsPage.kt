@@ -20,7 +20,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,20 +65,18 @@ fun SettingsPage(
                     StatusBadge(host)
                     Spacer(Modifier.weight(1f))
                     if (host.status == HostStatus.RUNNING || host.status == HostStatus.STARTING) {
-                        OutlinedButton(onClick = { host.stop() }) { Text("停止宿主") }
+                        OutlinedButton(onClick = { host.stop() }) { Text(Strings.t("停止宿主", "Stop host")) }
                     } else {
-                        Button(onClick = { host.start() }) { Text("启动宿主") }
-                    }
-                    Button(onClick = { host.openChat() }, enabled = host.status == HostStatus.RUNNING) {
-                        Text("打开聊天")
+                        Button(onClick = { host.start() }) { Text(Strings.t("启动宿主", "Start host")) }
                     }
                 }
                 Spacer(Modifier.height(10.dp))
                 val info = host.info
                 if (info != null) {
                     Muted(
-                        "pid ${info.optLong("pid")} · 版本 ${info.optString("version")} · " +
-                            "已运行 ${"%.0f".format(info.optDouble("uptimeS"))}s",
+                        "pid ${info.optLong("pid")} · " +
+                            Strings.t("版本", "version") + " ${info.optString("version")} · " +
+                            Strings.t("已运行", "up") + " ${"%.0f".format(info.optDouble("uptimeS"))}s",
                     )
                     Spacer(Modifier.height(4.dp))
                     Muted("WebUI ${host.webuiUrl}   Hub ${host.hubUrl}")
@@ -92,28 +89,42 @@ fun SettingsPage(
         // ── host paths ──
         Surface(color = p.surface, shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                SectionTitle("宿主")
+                SectionTitle(Strings.t("宿主", "HOST"))
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(python, { python = it }, label = { Text("python 可执行文件") }, singleLine = true, modifier = Modifier.width(300.dp))
-                    OutlinedTextField(repo, { repo = it }, label = { Text("仓库根目录（含 pot/ 包）") }, singleLine = true, modifier = Modifier.weight(1f))
+                    OutlinedTextField(
+                        python,
+                        { python = it },
+                        label = { Text(Strings.t("python 可执行文件", "python executable")) },
+                        singleLine = true,
+                        modifier = Modifier.width(300.dp),
+                    )
+                    OutlinedTextField(
+                        repo,
+                        { repo = it },
+                        label = {
+                            Text(Strings.t("仓库根目录（含 pot/ 包）", "Repo root (holds the pot/ package)"))
+                        },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Switch(settings.autoRestart, { settings.autoRestart = it; settings.save() })
-                    Text("宿主崩溃后自动重启", fontSize = 13.sp)
+                    Text(Strings.t("宿主崩溃后自动重启", "Restart host after a crash"), fontSize = 13.sp)
                     Spacer(Modifier.width(16.dp))
                     Switch(settings.autoStart, { settings.autoStart = it; settings.save() })
-                    Text("启动器打开时就拉起宿主", fontSize = 13.sp)
+                    Text(Strings.t("启动器打开时就拉起宿主", "Start host with the launcher"), fontSize = 13.sp)
                     Spacer(Modifier.weight(1f))
                     Button(
                         onClick = {
                             settings.python = python.trim()
                             settings.repo = repo.trim()
                             settings.save()
-                            state.toast("已保存（下次启动宿主时生效）")
+                            state.toast(Strings.t("已保存（下次启动宿主时生效）", "Saved (applies next host start)"))
                         },
-                    ) { Text("保存路径") }
+                    ) { Text(Strings.t("保存路径", "Save paths")) }
                 }
             }
         }
@@ -121,17 +132,19 @@ fun SettingsPage(
         // ── model ──
         Surface(color = p.surface, shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp)) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                SectionTitle("模型")
+                SectionTitle(Strings.t("模型", "MODEL"))
                 Spacer(Modifier.height(10.dp))
                 val model = state.model
                 if (model == null) {
-                    Muted("宿主运行中才能读取模型配置。")
+                    Muted(Strings.t("宿主运行中才能读取模型配置。", "Model settings need the host running."))
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("当前：", color = p.muted, fontSize = 12.sp)
+                        Text(Strings.t("当前：", "Current:"), color = p.muted, fontSize = 12.sp)
                         Text(model.optString("model"), color = p.fg, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                         Box {
-                            OutlinedButton(onClick = { modelOpen = true }) { Text("换模型") }
+                            OutlinedButton(onClick = { modelOpen = true }) {
+                                Text(Strings.t("换模型", "Change model"))
+                            }
                             DropdownMenu(expanded = modelOpen, onDismissRequest = { modelOpen = false }) {
                                 val list = model.optJSONArray("models")
                                 if (list != null) {
@@ -147,9 +160,21 @@ fun SettingsPage(
                         }
                     }
                     Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(endpoint, { endpoint = it }, label = { Text("接口地址（endpoint）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        endpoint,
+                        { endpoint = it },
+                        label = { Text(Strings.t("接口地址（endpoint）", "Endpoint")) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(apiKey, { apiKey = it }, label = { Text("API Key（留空=不改）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(
+                        apiKey,
+                        { apiKey = it },
+                        label = { Text(Strings.t("API Key（留空=不改）", "API Key (blank = unchanged)")) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
@@ -157,8 +182,10 @@ fun SettingsPage(
                                 state.saveModel(apiKey.ifBlank { null }, endpoint.ifBlank { null }, null)
                                 apiKey = ""
                             },
-                        ) { Text("保存模型配置") }
-                        OutlinedButton(onClick = { state.loadModel() }) { Text("重新读取") }
+                        ) { Text(Strings.t("保存模型配置", "Save model config")) }
+                        OutlinedButton(onClick = { state.loadModel() }) {
+                            Text(Strings.t("重新读取", "Reload"))
+                        }
                     }
                 }
             }
@@ -171,11 +198,11 @@ fun StatusBadge(host: HostManager) {
     val p = pal
     val (text, color) =
         when (host.status) {
-            HostStatus.RUNNING -> "运行中" to p.primary
-            HostStatus.STARTING -> "启动中…" to p.warning
-            HostStatus.STOPPING -> "停止中…" to p.warning
-            HostStatus.CRASHED -> "已崩溃" to p.error
-            HostStatus.STOPPED -> "未运行" to p.muted
+            HostStatus.RUNNING -> Strings.t("运行中", "Running") to p.primary
+            HostStatus.STARTING -> Strings.t("启动中…", "Starting…") to p.warning
+            HostStatus.STOPPING -> Strings.t("停止中…", "Stopping…") to p.warning
+            HostStatus.CRASHED -> Strings.t("已崩溃", "Crashed") to p.error
+            HostStatus.STOPPED -> Strings.t("未运行", "Not running") to p.muted
         }
     Surface(color = color.copy(alpha = 0.15f), shape = androidx.compose.foundation.shape.RoundedCornerShape(99.dp)) {
         Text(

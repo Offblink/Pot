@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import dispatch, runlog
-from ..config import local_version
+from ..config import UI_LANGS, load_config, local_version, save_config
 from ..errors import PotError
 from .asks import Asks
 from .relay import Relay
@@ -93,6 +93,10 @@ class Hub:
             "version": local_version(),
             "uptimeS": round(time.monotonic() - self._started, 1),
             "webui": self.webui_url,
+            # spec §74: the launcher's language switch is one control for both halves.
+            # The launcher compares this with its own setting and writes through
+            # /api/host/lang only when they differ, so a start is not a config write.
+            "ui_lang": load_config().ui_lang,
         }
 
     @property
@@ -275,6 +279,18 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/api/roles/delete":
                 self.hub.roles.delete(str(body.get("id") or ""), "human")
                 self._reply({"ok": True})
+            # The launcher's language switch, other half (spec §74): config.json
+            # `ui_lang` is what /lang.js serves to the WebUI, and the host process
+            # owns that file and its lock — so the write happens here, not from
+            # another process editing JSON behind the config lock's back.
+            elif path == "/api/host/lang":
+                lang = str(body.get("lang") or "")
+                if lang not in UI_LANGS:
+                    raise ValueError(f"lang must be one of {UI_LANGS}")
+                cfg = load_config()
+                cfg.ui_lang = lang
+                save_config(cfg)
+                self._reply({"ok": True, "ui_lang": lang})
             else:
                 self._reply({"error": "not found"}, 404)
         except PotError as exc:

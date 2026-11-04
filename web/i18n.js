@@ -132,6 +132,8 @@
       'consent.placeholder': '自定义回复（可选）',
       'consent.placeholderDesktop': '自定义回复（可选，留空直接点允许/禁止）',
       'consent.hint': '· 需要长期放行？在好友会话顶部把滑块拨到「允许」',
+      'consent.allowed': '已放行',
+      'consent.denied': '已拒绝',
 
       /* ---- transfer modal ---- */
       'xfer.waiting': '等待…',
@@ -342,6 +344,8 @@
       'consent.placeholder': 'Custom reply (optional)',
       'consent.placeholderDesktop': 'Custom reply (optional; leave empty to just allow/deny)',
       'consent.hint': '· Need standing permission? Move the slider to "Allow" at the top of the friend view',
+      'consent.allowed': 'Allowed',
+      'consent.denied': 'Denied',
 
       'xfer.waiting': 'Waiting…',
       'xfer.done': 'Done',

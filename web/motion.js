@@ -54,7 +54,11 @@
       transformPerspective: 700, onComplete: function () {
         var stamp = document.createElement('div');
         stamp.className = 'motion-stamp ' + (ok ? 'ok' : 'no');
-        stamp.textContent = ok ? '已放行' : '已拒绝';
+        // i18n: the stamp is text the user reads, so it follows the launcher's
+        // language like every other label (was hardcoded Chinese).
+        var t = window.FungiI18N;
+        stamp.textContent = t ? t.t(ok ? 'consent.allowed' : 'consent.denied')
+          : (ok ? '已放行' : '已拒绝');
         card.appendChild(stamp);
         gsap.fromTo(stamp,
           { scale: 2.4, opacity: 0, rotation: -20 },

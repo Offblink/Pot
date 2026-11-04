@@ -25,8 +25,22 @@ class LauncherSettings(
     var autoStart by mutableStateOf(true)
     var dark by mutableStateOf(false)
 
+    /** Launcher language; the same switch writes config.json `ui_lang` (see Main). */
+    var lang by mutableStateOf(Lang.ZH)
+        private set
+
+    /** One switch, two halves: the launcher repaints now, the WebUI follows on reload. */
+    fun chooseLang(value: Lang) {
+        lang = value
+        Strings.lang = value
+        save()
+    }
+
     fun load() {
-        if (!file.isFile) return
+        if (!file.isFile) {
+            Strings.lang = lang
+            return
+        }
         runCatching {
             val j = JSONObject(file.readText(Charsets.UTF_8))
             python = j.optString("python", python)
@@ -34,7 +48,9 @@ class LauncherSettings(
             autoRestart = j.optBoolean("autoRestart", autoRestart)
             autoStart = j.optBoolean("autoStart", autoStart)
             dark = j.optBoolean("dark", dark)
+            lang = Lang.of(j.optString("lang", lang.code))
         }
+        Strings.lang = lang
     }
 
     fun save() {
@@ -47,6 +63,7 @@ class LauncherSettings(
                     .put("autoRestart", autoRestart)
                     .put("autoStart", autoStart)
                     .put("dark", dark)
+                    .put("lang", lang.code)
             file.writeText(j.toString(2), Charsets.UTF_8)
         }
     }
@@ -127,7 +144,7 @@ class HostManager(
             while (true) {
                 val code =
                     runCatching { runProcess() }.getOrElse { e ->
-                        lastError = e.message ?: "启动失败"
+                        lastError = e.message ?: Strings.t("启动失败", "Failed to start")
                         -1
                     }
                 if (stopping) {
@@ -136,11 +153,17 @@ class HostManager(
                 }
                 status = HostStatus.CRASHED
                 poll?.cancel()
-                if (lastError.isEmpty()) lastError = "host 退出 (code=$code)"
+                if (lastError.isEmpty()) {
+                    lastError = Strings.t("宿主退出 (code=$code)", "host exited (code=$code)")
+                }
                 if (!settings.autoRestart) return@launch
                 starts += 1
                 if (starts > MAX_RESTARTS) {
-                    lastError = "连续启动失败 $MAX_RESTARTS 次，已停止自动重启"
+                    lastError =
+                        Strings.t(
+                            "连续启动失败 $MAX_RESTARTS 次，已停止自动重启",
+                            "$MAX_RESTARTS failed starts in a row — auto-restart stopped",
+                        )
                     return@launch
                 }
                 delay(starts * 1000L)
@@ -238,7 +261,9 @@ class HostManager(
                     } catch (e: Exception) {
                         fails += 1
                         if (fails >= 3 && status == HostStatus.RUNNING) {
-                            lastError = "失去与 host 的连接：" + (e.message ?: "unknown")
+                            lastError =
+                                Strings.t("失去与宿主连接：", "Lost the connection to the host: ") +
+                                    (e.message ?: "unknown")
                             process?.let { if (it.isAlive) killTree(it.pid()) }
                             break
                         }
