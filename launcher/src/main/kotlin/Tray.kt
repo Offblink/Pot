@@ -125,6 +125,21 @@ class TrayController {
         val x = at.x.coerceIn(work.x, (work.x + work.width - size.width).coerceAtLeast(work.x))
         val y = (at.y - size.height).coerceAtLeast(work.y)
         menu.show(popupOwner, x, y)
+        // A popup that never takes focus cannot learn that the user clicked
+        // somewhere else, so it stayed on screen after the flyout closed (user
+        // report 2026-11-04: 「出现托盘关了还在的情况，我想点击其他区域关闭的」).
+        // Take focus for the popup window and close on its loss.
+        (javax.swing.SwingUtilities.getWindowAncestor(menu) as? java.awt.Window)?.let { w ->
+            w.setFocusableWindowState(true)
+            w.addWindowFocusListener(
+                object : java.awt.event.WindowAdapter() {
+                    override fun windowLostFocus(e: java.awt.event.WindowEvent) {
+                        menu.isVisible = false
+                    }
+                },
+            )
+            w.requestFocus()
+        }
     }
 
     /** The app mark, 32px (Windows trays scale it down; auto-size keeps the ratio). */
