@@ -1119,13 +1119,23 @@ def _free_port(preferred: int | None) -> int:
         return sock.getsockname()[1]
 
 
-def run_server(port: int | None = None, runtime: WebUIRuntime | None = None) -> None:
+def run_server(
+    port: int | None = None, runtime: WebUIRuntime | None = None, hub_port: int | None = None
+) -> None:
     import webbrowser  # noqa: PLC0415 (only needed to open the browser)
+
+    from pot.hub.app import Hub  # noqa: PLC0415 (lazy: console mode never pays for it)
 
     rt = runtime or WebUIRuntime()
     server = make_webui_server(port, rt)
     url = f"http://localhost:{server.server_address[1]}"
+    # The launcher (spec §4 方案 A) spawns this process and parses these two
+    # lines: WebUI for "open chat", hub for /api/board/* + /api/host/status.
+    hub = Hub("pot", WEBUI_TOKEN, PROJECT_ROOT / "data", port=hub_port if hub_port else 0)
+    hub.webui_url = url
+    hub.start()
     print(f"  Pot WebUI: {url}")
+    print(f"  Pot Hub: http://127.0.0.1:{hub.port}")
     print("  Press Ctrl+C to stop")
     webbrowser.open(url)
     mcp_tools = rt.mcp_tools()
@@ -1138,6 +1148,7 @@ def run_server(port: int | None = None, runtime: WebUIRuntime | None = None) -> 
     except KeyboardInterrupt:
         pass
     finally:
+        hub.stop()
         server.server_close()
 
 

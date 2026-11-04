@@ -5,6 +5,11 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 
+# launcher (CMP) build state — gradle outputs, never committed
+launcher/.gradle/
+launcher/build/
+launcher/.kotlin/
+
 # runtime state — user-editable, never committed
 data/
 sessions/

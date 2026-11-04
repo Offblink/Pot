@@ -1,17 +1,23 @@
-"""Hub HTTP API, loopback-only: poll + sessions (spec §1.2/§10-3).
+"""Hub HTTP API, loopback-only: sessions + board/roles/host-status (spec §1.2/§4).
 
 Token auth on every endpoint. The room-protocol family (join/leave/heartbeat/
 send/fs), the friend/mail routes and the transfer routes are gone with the
-rooms; what stays is the session store family the launcher rides on.
+rooms; what stays is the session store family plus the launcher's API
+(spec §4.1: the CMP launcher rides /api/board/*, /api/roles/*,
+/api/host/status over this loopback server).
 """
 
 import json
+import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import runlog
+from .. import dispatch, runlog
+from ..config import local_version
+from ..errors import PotError
 from .asks import Asks
 from .relay import Relay
 from .roster import Roster
@@ -49,6 +55,8 @@ class Hub:
         data_root: Path,
         heartbeat_timeout: float = 30.0,
         port: int = 0,
+        board=None,
+        roles=None,
     ):
         self.name = name
         self.token = token
@@ -58,10 +66,34 @@ class Hub:
         self.relay = Relay(name)
         self.asks = Asks()
         self.store = Store(data_root, self.asks)
+        self._board = board  # None → the process-wide dispatch singletons
+        self._roles = roles
+        self.webui_url: str = ""  # filled by run_server for /api/host/status
+        self._started = time.monotonic()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._reaper: threading.Thread | None = None
         self._stop = threading.Event()
+
+    @property
+    def board(self):
+        return self._board if self._board is not None else dispatch.board()
+
+    @property
+    def roles(self):
+        return self._roles if self._roles is not None else dispatch.roles_repo()
+
+    def status(self) -> dict:
+        """spec §4: what the launcher polls to see the host is alive (and to
+        show model/version in settings)."""
+        return {
+            "ok": True,
+            "pid": os.getpid(),
+            "name": self.name,
+            "version": local_version(),
+            "uptimeS": round(time.monotonic() - self._started, 1),
+            "webui": self.webui_url,
+        }
 
     @property
     def port(self) -> int:
@@ -166,8 +198,87 @@ class _Handler(BaseHTTPRequestHandler):
                 self._save(body)
             elif path == "/api/session/delete":
                 self._session_delete(body)
+            # launcher board/roles API (spec §4.1) — human actions, human token
+            elif path == "/api/board/create":
+                self._reply(
+                    {
+                        "ok": True,
+                        "card": self.hub.board.human_create(
+                            str(body.get("title") or ""),
+                            desc=str(body.get("desc") or ""),
+                            labels=body.get("labels"),
+                            priority=str(body.get("priority") or "normal"),
+                            role=body.get("role"),
+                            checklist=body.get("checklist"),
+                            status=str(body.get("status") or "todo"),
+                        ),
+                    }
+                )
+            elif path == "/api/board/assign":
+                self._reply(
+                    {
+                        "ok": True,
+                        "card": self.hub.board.human_assign(
+                            str(body.get("card_id") or ""),
+                            body.get("role"),
+                            body.get("if_version"),
+                        ),
+                    }
+                )
+            elif path == "/api/board/complete":
+                self._reply(
+                    {
+                        "ok": True,
+                        "card": self.hub.board.human_complete(
+                            str(body.get("card_id") or ""), body.get("if_version")
+                        ),
+                    }
+                )
+            elif path == "/api/board/reject":
+                self._reply(
+                    {
+                        "ok": True,
+                        "card": self.hub.board.human_reject(
+                            str(body.get("card_id") or ""),
+                            str(body.get("reason") or ""),
+                            body.get("if_version"),
+                        ),
+                    }
+                )
+            elif path == "/api/board/renew":
+                self._reply(
+                    {
+                        "ok": True,
+                        "card": self.hub.board.human_renew_lease(
+                            str(body.get("card_id") or ""), body.get("if_version")
+                        ),
+                    }
+                )
+            elif path == "/api/board/delete":
+                self._reply(
+                    {
+                        "ok": True,
+                        "card": self.hub.board.human_delete(
+                            str(body.get("card_id") or ""), body.get("if_version")
+                        ),
+                    }
+                )
+            elif path == "/api/roles/create":
+                fields = {k: v for k, v in body.items() if k != "token"}
+                self._reply({"ok": True, "role": self.hub.roles.create(fields, "human").to_dict()})
+            elif path == "/api/roles/update":
+                role_id = str(body.get("id") or "")
+                fields = {k: v for k, v in body.items() if k not in ("token", "id")}
+                self._reply(
+                    {"ok": True, "role": self.hub.roles.update(role_id, fields, "human").to_dict()}
+                )
+            elif path == "/api/roles/delete":
+                self.hub.roles.delete(str(body.get("id") or ""), "human")
+                self._reply({"ok": True})
             else:
                 self._reply({"error": "not found"}, 404)
+        except PotError as exc:
+            self._reply({"error": str(exc)}, 400)
         except (ValueError, json.JSONDecodeError) as exc:
             self._reply({"error": str(exc)}, 400)
 
@@ -178,14 +289,30 @@ class _Handler(BaseHTTPRequestHandler):
         if token != self.hub.token:
             self._bad_token()
             return
-        if url.path == "/api/poll":
-            self._poll(params)
-        elif url.path == "/api/sessions":
-            self._reply({"sessions": self.hub.store.sessions.list_sessions()})
-        elif url.path == "/api/session":
-            self._session_load(params)
-        else:
-            self._reply({"error": "not found"}, 404)
+        try:
+            if url.path == "/api/poll":
+                self._poll(params)
+            elif url.path == "/api/sessions":
+                self._reply({"sessions": self.hub.store.sessions.list_sessions()})
+            elif url.path == "/api/session":
+                self._session_load(params)
+            elif url.path == "/api/board":
+                self._reply(
+                    {
+                        "cards": self.hub.board.list(),
+                        "roles": [r.to_dict() for r in self.hub.roles.list(include_templates=True)],
+                    }
+                )
+            elif url.path == "/api/roles":
+                self._reply(
+                    {"roles": [r.to_dict() for r in self.hub.roles.list(include_templates=True)]}
+                )
+            elif url.path == "/api/host/status":
+                self._reply(self.hub.status())
+            else:
+                self._reply({"error": "not found"}, 404)
+        except PotError as exc:
+            self._reply({"error": str(exc)}, 400)
 
     def do_DELETE(self) -> None:
         # No DELETE routes survived the transfer cut.
