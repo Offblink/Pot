@@ -367,7 +367,11 @@ html.motion-on .agent-bubble{animation:none}
   -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.4l2.4 2.4 4.6-5.2' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/0.62rem no-repeat;
   mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.4l2.4 2.4 4.6-5.2' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/0.62rem no-repeat}
 .plan-item.done::after{opacity:1}
-/* The strike line GROWS left→right once an item flips done — that sweep is the animation. */
-.plan-item .plan-text{position:relative;display:inline}
-.plan-item .plan-text::after{content:"";position:absolute;left:0;top:55%;height:1.5px;width:0;background:currentColor;border-radius:1px;transition:width 0.45s var(--ease-out-expo)}
-.plan-item.done .plan-text::after{width:100%}
+/* The strike: text-decoration so EVERY wrapped line is struck. The old
+   ::after bar anchored to the first line fragment of a long item and missed
+   the rest (real-machine report, 2026-11-04). The sweep became a color
+   transition — text-decoration-color animates, per-fragment width does not. */
+.plan-item .plan-text{position:relative;display:inline;text-decoration:line-through;
+  text-decoration-color:transparent;text-decoration-thickness:1.5px;text-decoration-skip-ink:none;
+  transition:text-decoration-color 0.45s var(--ease-out-expo)}
+.plan-item.done .plan-text{text-decoration-color:currentColor}
