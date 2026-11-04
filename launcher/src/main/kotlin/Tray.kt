@@ -23,8 +23,10 @@ import javax.swing.KeyStroke
 import javax.swing.UIManager
 
 /**
- * Tray icon + its menu. Exists only while the host runs (spec 裁决 Q5) and is
- * rebuilt on every state/language change.
+ * Tray icon + its menu. Lives as long as the launcher process does (裁决 24:
+ * closing the window hides it here, so the icon must outlive both the window and
+ * the host). State and strings are read when the menu opens, so nothing has to be
+ * rebuilt on a language flip — only the tooltip is refreshed.
  *
  * The menu is NOT an AWT `PopupMenu` (user report 2026-11-04, twice: 「中文失败」):
  * Windows menus are native win32 menus, they draw with the SYSTEM menu font and the
@@ -41,41 +43,40 @@ class TrayController {
     private var leaveWatch: javax.swing.Timer? = null
 
     private var running = false
+    private var onShow: () -> Unit = {}
     private var onOpenChat: () -> Unit = {}
     private var onStart: () -> Unit = {}
     private var onStop: () -> Unit = {}
     private var onExit: () -> Unit = {}
 
     fun update(
-        active: Boolean,
         running: Boolean,
+        onShow: () -> Unit,
         onOpenChat: () -> Unit,
         onStart: () -> Unit,
         onStop: () -> Unit,
         onExit: () -> Unit,
     ) {
         this.running = running
+        this.onShow = onShow
         this.onOpenChat = onOpenChat
         this.onStart = onStart
         this.onStop = onStop
         this.onExit = onExit
-        // An open menu belongs to the tray that is about to be replaced or removed
-        // (host stopped/crashed, language flipped). Without this it outlived its
-        // tray icon and sat on the desktop as an orphan window (user report).
-        closePopup()
         EventQueue.invokeLater {
-            icon?.let {
-                runCatching { SystemTray.getSystemTray().remove(it) }
-                icon = null
+            val existing = icon
+            if (existing != null) { // already up: only the tooltip can change
+                existing.toolTip = trayTooltip()
+                return@invokeLater
             }
-            if (!active || !SystemTray.isSupported()) return@invokeLater
+            if (!SystemTray.isSupported()) return@invokeLater
             runCatching {
-                val ti =
-                    TrayIcon(
-                        trayImage(),
-                        potString("Pot — 看板/设置/打开聊天", "Pot — board / settings / open chat"),
-                    )
+                val ti = TrayIcon(trayImage(), trayTooltip())
                 ti.isImageAutoSize = true
+                // Windows delivers the *default action* (double-click) separately from
+                // mouse events, and some shells eat the single press; both routes end
+                // at the same idempotent "show me the window".
+                ti.addActionListener { onShow() }
                 ti.addMouseListener(
                     object : java.awt.event.MouseAdapter() {
                         override fun mousePressed(e: MouseEvent) = maybePopup(e)
@@ -106,39 +107,13 @@ class TrayController {
         runCatching { if (open != null && open.isDisplayable) open.dispose() }
     }
 
-    /**
-     * Close once the pointer leaves the menu. A window shown in response to a tray
-     * click does not reliably become the FOREGROUND window on Windows (the shell owns
-     * the input that opened the flyout), so a focus-loss listener never fires — that
-     * is why the menu kept sitting there (user report, twice). Pointer motion needs
-     * no activation: if the cursor is not over the menu, the menu is gone.
-     */
-    private fun watchPointer(win: JWindow) {
-        leaveWatch =
-            javax.swing.Timer(150) {
-                val open = popup
-                if (open == null || !open.isDisplayable) {
-                    leaveWatch?.stop()
-                    return@Timer
-                }
-                val at = MouseInfo.getPointerInfo()?.location
-                if (at != null) {
-                    // Grown by the gap between the click point and the menu edge, so
-                    // the pointer resting where it opened is still "inside".
-                    val zone = open.bounds.apply { grow(8, 8) }
-                    if (!zone.contains(at)) closePopup()
-                }
-            }.apply {
-                initialDelay = 700   // the click that opened it must not count
-                start()
-            }
-    }
-
     private fun maybePopup(e: MouseEvent) {
         if (e.isPopupTrigger) {
             EventQueue.invokeLater { showMenu() }
-        } else if (e.button == MouseEvent.BUTTON1 && running) {
-            onOpenChat()
+        } else if (e.button == MouseEvent.BUTTON1) {
+            // Left click brings the window back — with close-to-tray it is the only
+            // way home when the board is hidden; 打开聊天 lives in the menu.
+            onShow()
         }
     }
 
@@ -166,6 +141,7 @@ class TrayController {
             panel.add(button)
         }
 
+        add(potString("显示窗口", "Show window")) { onShow() }
         add(potString("打开聊天", "Open chat"), running) { onOpenChat() }
         if (running) {
             add(potString("停止宿主", "Stop host")) { onStop() }
@@ -216,6 +192,34 @@ class TrayController {
         watchPointer(win)
     }
 
+    /**
+     * Close once the pointer leaves the menu. A window shown in response to a tray
+     * click does not reliably become the FOREGROUND window on Windows (the shell owns
+     * the input that opened the flyout), so a focus-loss listener never fires — that
+     * is why the menu kept sitting there (user report, twice). Pointer motion needs
+     * no activation: if the cursor is not over the menu, the menu is gone.
+     */
+    private fun watchPointer(win: JWindow) {
+        leaveWatch =
+            javax.swing.Timer(150) {
+                val open = popup
+                if (open == null || !open.isDisplayable) {
+                    leaveWatch?.stop()
+                    return@Timer
+                }
+                val at = MouseInfo.getPointerInfo()?.location
+                if (at != null) {
+                    // Grown by the gap between the click point and the menu edge, so
+                    // the pointer resting where it opened is still "inside".
+                    val zone = open.bounds.apply { grow(8, 8) }
+                    if (!zone.contains(at)) closePopup()
+                }
+            }.apply {
+                initialDelay = 700 // the click that opened it must not count
+                start()
+            }
+    }
+
     private fun menuItem(
         label: String,
         enabled: Boolean,
@@ -251,6 +255,9 @@ class TrayController {
         }
         return button
     }
+
+    private fun trayTooltip(): String =
+        potString("Pot — 看板/设置/打开聊天", "Pot — board / settings / open chat")
 
     private fun potString(
         zh: String,

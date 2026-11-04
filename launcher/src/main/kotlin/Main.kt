@@ -67,6 +67,9 @@ fun main() = application {
     val scope = rememberCoroutineScope()
     var page by remember { mutableStateOf(0) }
     val tray = remember { TrayController() }
+    // The Compose window, captured from the content scope: closing requests hide it,
+    // and the tray has to be able to bring it back (裁决 24).
+    var winRef by remember { mutableStateOf<java.awt.Window?>(null) }
 
     LaunchedEffect(Unit) {
         if (settings.autoStart) host.start()
@@ -95,13 +98,19 @@ fun main() = application {
             snackbar.showSnackbar(msg)
         }
     }
-    // 托盘语义（裁决 Q5）：host 运行才有托盘；点托盘菜单进 WebUI / 停 host / 退出。
-    // The tray is an AWT menu, so its labels are painted once — the language is a
-    // key here, or flipping it would leave a stale Chinese menu behind.
-    LaunchedEffect(host.status, host.webuiUrl, settings.lang) {
+    // 托盘（裁决 24）：进程活着托盘就在——关窗只是把窗口收起来，宿主照跑。
+    // 菜单在弹出时读状态与文案，所以这里只需要刷新回调与 tooltip（语言是 key，
+    // 否则 tooltip 会停在上一种语言）。
+    LaunchedEffect(host.status, settings.lang) {
         tray.update(
-            active = host.status == HostStatus.RUNNING || host.status == HostStatus.STARTING,
             running = host.status == HostStatus.RUNNING,
+            onShow = {
+                winRef?.let {
+                    it.isVisible = true
+                    it.toFront()
+                    it.requestFocus()
+                }
+            },
             onOpenChat = { host.openChat() },
             onStart = { host.start() },
             onStop = { host.stop() },
@@ -114,17 +123,18 @@ fun main() = application {
     }
 
     Window(
-        onCloseRequest = {
-            host.stopBlocking()
-            tray.dispose()
-            exitApplication()
-        },
+        // Close-to-tray (裁决 24): hiding keeps the host and the board alive; the
+        // only way out is 退出 in the tray menu.
+        onCloseRequest = { winRef?.isVisible = false },
         title = "Pot",
         state = rememberWindowState(width = 940.dp, height = 600.dp),
     ) {
         // Taskbar/title-bar mark (the AWT window owns the icon; Compose has no
-        // icon parameter on Window).
-        LaunchedEffect(Unit) { appIcon(64)?.let { window.iconImage = it } }
+        // icon parameter on Window), plus the handle the tray needs to un-hide it.
+        LaunchedEffect(Unit) {
+            winRef = window
+            appIcon(64)?.let { window.iconImage = it }
+        }
         PotTheme(settings.dark) {
             Scaffold(
                 snackbarHost = { SnackbarHost(snackbar) },
