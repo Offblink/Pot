@@ -1,40 +1,50 @@
 package pot.launcher
 
+import java.awt.Color
+import java.awt.Dimension
 import java.awt.EventQueue
+import java.awt.GraphicsEnvironment
+import java.awt.MouseInfo
 import java.awt.SystemTray
 import java.awt.TrayIcon
+import java.awt.event.ActionEvent
+import java.awt.event.MouseEvent
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 import java.awt.image.BufferedImage
+import javax.swing.AbstractAction
+import javax.swing.BorderFactory
+import javax.swing.BoxLayout
+import javax.swing.JButton
+import javax.swing.JPanel
+import javax.swing.JSeparator
+import javax.swing.JWindow
+import javax.swing.KeyStroke
+import javax.swing.UIManager
 
 /**
  * Tray icon + its menu. Exists only while the host runs (spec 裁决 Q5) and is
  * rebuilt on every state/language change.
  *
- * The menu is a SWING popup, not an AWT `PopupMenu` (user report 2026-11-04, twice:
- * 「中文失败」). Windows menus are native win32 menus and draw their labels with the
- * SYSTEM menu font; the JDK's `WMenuItemPeer.setFont` does not change that, so on
- * this English Windows every Chinese label came out as tofu boxes even after
- * `MenuItem.font` was set to Microsoft YaHei. Java2D has real font fallback, so a
- * Swing popup is the one shape that renders both languages.
+ * The menu is NOT an AWT `PopupMenu` (user report 2026-11-04, twice: 「中文失败」):
+ * Windows menus are native win32 menus, they draw with the SYSTEM menu font and the
+ * JDK's `WMenuItemPeer.setFont` does not change that, so on this English Windows
+ * every Chinese label came out as tofu. It is not a Swing `JPopupMenu` either: those
+ * live in a window the PopupFactory creates unfocusable, so it never learns that the
+ * user clicked elsewhere and stayed on screen as an orphan (「托盘关了还在」). This
+ * is our own focusable `JWindow` with flat buttons — one shape that both paints
+ * Chinese and closes on the first click anywhere else.
  */
 class TrayController {
     private var icon: TrayIcon? = null
+    private var popup: JWindow? = null
+    private var leaveWatch: javax.swing.Timer? = null
 
     private var running = false
     private var onOpenChat: () -> Unit = {}
     private var onStart: () -> Unit = {}
     private var onStop: () -> Unit = {}
     private var onExit: () -> Unit = {}
-
-    /** The menu currently on screen (one at a time). */
-    private var popup: javax.swing.JPopupMenu? = null
-
-    /** Owner for a heavyweight popup: a 1×1 window with no taskbar entry. */
-    private val popupOwner: javax.swing.JWindow by lazy {
-        javax.swing.JWindow().apply {
-            setBounds(0, 0, 1, 1)
-            isVisible = true
-        }
-    }
 
     fun update(
         active: Boolean,
@@ -51,8 +61,7 @@ class TrayController {
         this.onExit = onExit
         // An open menu belongs to the tray that is about to be replaced or removed
         // (host stopped/crashed, language flipped). Without this it outlived its
-        // tray icon and sat on the desktop as an orphan window (user report,
-        // 2026-11-04: 「出现托盘关了还在的情况」).
+        // tray icon and sat on the desktop as an orphan window (user report).
         closePopup()
         EventQueue.invokeLater {
             icon?.let {
@@ -64,14 +73,14 @@ class TrayController {
                 val ti =
                     TrayIcon(
                         trayImage(),
-                        Strings.t("Pot — 看板/设置/打开聊天", "Pot — board / settings / open chat"),
+                        potString("Pot — 看板/设置/打开聊天", "Pot — board / settings / open chat"),
                     )
                 ti.isImageAutoSize = true
                 ti.addMouseListener(
                     object : java.awt.event.MouseAdapter() {
-                        override fun mousePressed(e: java.awt.event.MouseEvent) = maybePopup(e)
+                        override fun mousePressed(e: MouseEvent) = maybePopup(e)
 
-                        override fun mouseReleased(e: java.awt.event.MouseEvent) = maybePopup(e)
+                        override fun mouseReleased(e: MouseEvent) = maybePopup(e)
                     },
                 )
                 SystemTray.getSystemTray().add(ti)
@@ -90,95 +99,163 @@ class TrayController {
 
     /** The one place an open menu dies; safe to call at any time. */
     private fun closePopup() {
+        leaveWatch?.stop()
+        leaveWatch = null
         val open = popup
         popup = null
-        open?.let {
-            runCatching {
-                it.isVisible = false
-                javax.swing.SwingUtilities.getWindowAncestor(it)?.dispose()
-            }
-        }
+        runCatching { if (open != null && open.isDisplayable) open.dispose() }
     }
 
-    private fun maybePopup(e: java.awt.event.MouseEvent) {
+    /**
+     * Close once the pointer leaves the menu. A window shown in response to a tray
+     * click does not reliably become the FOREGROUND window on Windows (the shell owns
+     * the input that opened the flyout), so a focus-loss listener never fires — that
+     * is why the menu kept sitting there (user report, twice). Pointer motion needs
+     * no activation: if the cursor is not over the menu, the menu is gone.
+     */
+    private fun watchPointer(win: JWindow) {
+        leaveWatch =
+            javax.swing.Timer(150) {
+                val open = popup
+                if (open == null || !open.isDisplayable) {
+                    leaveWatch?.stop()
+                    return@Timer
+                }
+                val at = MouseInfo.getPointerInfo()?.location
+                if (at != null) {
+                    // Grown by the gap between the click point and the menu edge, so
+                    // the pointer resting where it opened is still "inside".
+                    val zone = open.bounds.apply { grow(8, 8) }
+                    if (!zone.contains(at)) closePopup()
+                }
+            }.apply {
+                initialDelay = 700   // the click that opened it must not count
+                start()
+            }
+    }
+
+    private fun maybePopup(e: MouseEvent) {
         if (e.isPopupTrigger) {
             EventQueue.invokeLater { showMenu() }
-        } else if (e.button == java.awt.event.MouseEvent.BUTTON1 && running) {
+        } else if (e.button == MouseEvent.BUTTON1 && running) {
             onOpenChat()
         }
     }
 
     private fun showMenu() {
         closePopup()
-        val menu = javax.swing.JPopupMenu()
-        popup = menu
-        // Swing dismisses on ESC/outside-press itself; keep our handle honest so a
-        // later closePopup() never touches a dead window.
-        menu.addPopupMenuListener(
-            object : javax.swing.event.PopupMenuListener {
-                override fun popupMenuWillBecomeInvisible(e: javax.swing.event.PopupMenuEvent) {
-                    popup = null
-                }
 
-                override fun popupMenuWillBecomeVisible(e: javax.swing.event.PopupMenuEvent) = Unit
+        val panel =
+            JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                background = UIManager.getColor("PopupMenu.background") ?: Color.WHITE
+                border =
+                    BorderFactory.createLineBorder(
+                        UIManager.getColor("PopupMenu.borderColor") ?: Color(0xC8, 0xC8, 0xC8),
+                    )
+            }
 
-                override fun popupMenuCanceled(e: javax.swing.event.PopupMenuEvent) {
-                    popup = null
-                }
-            },
-        )
-        // A heavyweight popup can float above the taskbar; a lightweight one would
-        // be clipped to the (invisible, 1×1) owner.
-        menu.isLightWeightPopupEnabled = false
-
-        fun item(
+        fun add(
             label: String,
             enabled: Boolean = true,
             action: () -> Unit,
         ) {
-            val entry = javax.swing.JMenuItem(label)
-            entry.isEnabled = enabled
-            entry.addActionListener {
-                closePopup()
-                action()
-            }
-            menu.add(entry)
+            val button = menuItem(label, enabled, action)
+            button.alignmentX = 0f
+            button.maximumSize = Dimension(Int.MAX_VALUE, button.preferredSize.height)
+            panel.add(button)
         }
 
-        item(Strings.t("打开聊天", "Open chat"), running) { onOpenChat() }
+        add(potString("打开聊天", "Open chat"), running) { onOpenChat() }
         if (running) {
-            item(Strings.t("停止宿主", "Stop host")) { onStop() }
+            add(potString("停止宿主", "Stop host")) { onStop() }
         } else {
-            item(Strings.t("启动宿主", "Start host")) { onStart() }
+            add(potString("启动宿主", "Start host")) { onStart() }
         }
-        menu.addSeparator()
-        item(Strings.t("退出", "Quit")) { onExit() }
+        panel.add(JSeparator().apply { maximumSize = Dimension(Int.MAX_VALUE, height) })
+        add(potString("退出", "Quit")) { onExit() }
 
-        val at = java.awt.MouseInfo.getPointerInfo()?.location ?: return
-        // Pop UP from the click (user, 2026-11-04: 「显示在任务栏上面，不要盖住」):
-        // the icon sits in the tray, so showing at the pointer drops the menu over
-        // the taskbar. Work area = screen minus taskbar; clamp inside it.
-        val work = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
-        val size = menu.preferredSize
-        val x = at.x.coerceIn(work.x, (work.x + work.width - size.width).coerceAtLeast(work.x))
-        val y = (at.y - size.height).coerceAtLeast(work.y)
-        menu.show(popupOwner, x, y)
-        // A popup that never takes focus cannot learn that the user clicked
-        // somewhere else, so it stayed on screen after the flyout closed (user
-        // report 2026-11-04: 「出现托盘关了还在的情况，我想点击其他区域关闭的」).
-        // Take focus for the popup window and close on its loss.
-        (javax.swing.SwingUtilities.getWindowAncestor(menu) as? java.awt.Window)?.let { w ->
-            w.setFocusableWindowState(true)
-            w.addWindowFocusListener(
-                object : java.awt.event.WindowAdapter() {
-                    override fun windowLostFocus(e: java.awt.event.WindowEvent) {
-                        closePopup()
-                    }
-                },
-            )
-            w.requestFocus()
-        }
+        val win =
+            JWindow().apply {
+                isAlwaysOnTop = true
+                contentPane.add(panel)
+                pack()
+            }
+
+        val at = MouseInfo.getPointerInfo()?.location ?: return
+        // Pop UP from the click (user: 「显示在任务栏上面，不要盖住」): the icon sits
+        // in the tray, so showing at the pointer drops the menu over the taskbar.
+        // Work area = screen minus taskbar; clamp inside it.
+        val work = GraphicsEnvironment.getLocalGraphicsEnvironment().maximumWindowBounds
+        val x = at.x.coerceIn(work.x, (work.x + work.width - win.width).coerceAtLeast(work.x))
+        val y = (at.y - win.height).coerceAtLeast(work.y)
+        win.setLocation(x, y)
+
+        // The whole point of owning the window: it really takes focus, so clicking
+        // anywhere else (another app, the desktop, the shell) closes the menu.
+        win.addWindowFocusListener(
+            object : WindowAdapter() {
+                // Only a real focus LOSS closes it: `windowDeactivated` also fires
+                // when the shell's flyout re-activates itself right after our window
+                // shows, which killed the menu on the spot (seen on the box).
+                override fun windowLostFocus(e: WindowEvent) = closePopup()
+            },
+        )
+        win.rootPane.inputMap.put(KeyStroke.getKeyStroke("ESCAPE"), "pot-close")
+        win.rootPane.actionMap.put(
+            "pot-close",
+            object : AbstractAction() {
+                override fun actionPerformed(e: ActionEvent) = closePopup()
+            },
+        )
+
+        popup = win
+        win.isVisible = true
+        win.toFront()
+        win.requestFocus()
+        watchPointer(win)
     }
+
+    private fun menuItem(
+        label: String,
+        enabled: Boolean,
+        action: () -> Unit,
+    ): JButton {
+        val hover = UIManager.getColor("MenuItem.selectionBackground") ?: Color(0xDCE8F6)
+        val button =
+            JButton(label).apply {
+                isContentAreaFilled = false
+                isBorderPainted = false
+                isFocusPainted = false
+                horizontalAlignment = javax.swing.SwingConstants.LEFT
+                margin = java.awt.Insets(3, 16, 3, 32)
+                font = UIManager.getFont("MenuItem.font") ?: font
+                isEnabled = enabled
+            }
+        button.addMouseListener(
+            object : java.awt.event.MouseAdapter() {
+                override fun mouseEntered(e: MouseEvent) {
+                    if (!button.isEnabled) return
+                    button.background = hover
+                    button.isContentAreaFilled = true
+                }
+
+                override fun mouseExited(e: MouseEvent) {
+                    button.isContentAreaFilled = false
+                }
+            },
+        )
+        button.addActionListener {
+            closePopup()
+            action()
+        }
+        return button
+    }
+
+    private fun potString(
+        zh: String,
+        en: String,
+    ): String = Strings.t(zh, en)
 
     /** The app mark, 32px (Windows trays scale it down; auto-size keeps the ratio). */
     private fun trayImage(): BufferedImage {
@@ -192,9 +269,9 @@ class TrayController {
             java.awt.RenderingHints.KEY_ANTIALIASING,
             java.awt.RenderingHints.VALUE_ANTIALIAS_ON,
         )
-        g.color = java.awt.Color(0x4A, 0xDE, 0x80)
+        g.color = Color(0x4A, 0xDE, 0x80)
         g.fillOval(0, 0, 15, 15)
-        g.color = java.awt.Color(0x06, 0x06, 0x0A)
+        g.color = Color(0x06, 0x06, 0x0A)
         g.font = java.awt.Font("Segoe UI", java.awt.Font.BOLD, 11)
         g.drawString("P", 4, 12)
         g.dispose()
