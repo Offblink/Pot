@@ -15,7 +15,7 @@ dev = ["pytest", "ruff==0.13.0", "playwright==1.61.0"]
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-extend-exclude = ["sessions", "data"]  # runtime state, never linted
+extend-exclude = ["sessions", "data", "promo"]  # runtime state + the untracked promo studio, never linted
 
 [tool.ruff.lint]
 select = [

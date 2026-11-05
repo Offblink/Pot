@@ -280,6 +280,12 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 #tok-rate{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap;opacity:0;transition:opacity var(--t-med)}
 #tok-rate.on{opacity:1}
 
+/* ---- context size (本地估算): storage units, sits between the rate and the
+   theme switch. Unlike the rate it always shows (0 B with no session), so it
+   never goes blank mid-conversation; the rate's auto margin still holds the
+   whole right-edge group. ---- */
+#ctx-size{margin-left:10px;font-family:var(--mono);font-size:var(--fs-xs);color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+
 /* ---- theme switch (light default; sun = left, moon = right) ---- */
 .theme-switch{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
 .theme-ic{width:15px;height:15px;stroke:var(--dim);fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:stroke var(--t-med)}
@@ -383,7 +389,10 @@ html.motion-on .agent-bubble{animation:none}
 .plan-item.done .plan-text{text-decoration-color:currentColor}
 
 /* ---- scene (裁决 36, 同日修订): 正中任务板 + 正 N 边形工位 ---- */
-#scene-overlay{position:fixed;inset:0;z-index:15;background:var(--bg)}
+/* top:56px (2026-11-05): the overlay covers the session area only — the header
+   (theme switch, language, model select, board button) stays visible and
+   clickable above it. Sidebar stays excluded via the left override below. */
+#scene-overlay{position:fixed;inset:0;top:56px;z-index:15;background:var(--bg)}
 #scene-overlay.hidden{display:none}
 #scene{position:absolute;inset:0;overflow:hidden}
 #scene-floor{position:absolute;inset:0}

@@ -83,6 +83,7 @@ async function reloadSessionFromServer() {
     if (!r.ok) return;
     const s = await r.json();
     rawMessages = s.messages || [];
+    updateCtxSize();
     registerArchived(s.subagents);
     const stick = isNearBottom(msgs); // measure before the repaint replaces the DOM
     renderMessages(s);
@@ -134,6 +135,7 @@ async function switchSession(id) {
     const s = await r.json();
     setCurrentSession(s.id);
     rawMessages = s.messages || [];
+    updateCtxSize();
     S.clear();
     registerArchived(s.subagents);
     renderMessages(s);
@@ -142,6 +144,21 @@ async function switchSession(id) {
     reattachIfRunning(s.id);
     Alerts.tick(); // 用户正在看这个会话：立刻告诉服务端（红点该掉、铃该停）
   } catch (e) { console.error('switchSession:', e); }
+}
+
+/* Context size (本地口径, 2026-11-05): the header reads storage units off the
+   open session's rawMessages — UTF-8 bytes of the serialized transcript, so
+   system rows and tool results count (they are 86% of a real turn). No usage
+   API, no token count: the page already holds the bytes. Recomputed at every
+   mutation point, which includes a finished turn (done → reloadSessionFromServer). */
+function updateCtxSize() {
+  const el = document.getElementById('ctx-size');
+  if (!el) return;
+  let bytes = 0;
+  try { bytes = new TextEncoder().encode(JSON.stringify(rawMessages)).length; } catch (e) {}
+  el.textContent = bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB'
+    : bytes >= 1024 ? (bytes / 1024).toFixed(1) + ' KB'
+    : bytes + ' B';
 }
 
 function renderMessages(s) {
@@ -262,6 +279,7 @@ async function newSession() {
     if (!r.ok) throw new Error(r.status);
     const { id } = await r.json();
     setCurrentSession(id); rawMessages = []; S.clear();
+    updateCtxSize();
     sessionDirty = false;
     await loadSessions();
   } catch (e) { console.error('newSession:', e); }
@@ -576,6 +594,7 @@ async function send() {
   const sid = currentSessionId;
   turn = { sessionId: sid, entries: [] }; // chronological: reasoning/text/tool/ask/error
   rawMessages.push({ role: 'user', content: text });
+  updateCtxSize();
   sessionDirty = true;
   turn.userText = text;
   input.value = ''; setBusy(true); setStatus(T('status.thinking'));
