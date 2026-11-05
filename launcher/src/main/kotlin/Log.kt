@@ -28,15 +28,21 @@ object Log {
         prune(folder)
         val target = File(folder, "launcher-${LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE)}.log")
         file = target
+        val handle = ProcessHandle.current()
+        val parentPid = handle.parent().map { it.pid() }.orElse(-1L)
         val header =
             "--- run ${LocalDateTime.now().format(stamp)} pot ${POT_VERSION} " +
                 "| java ${System.getProperty("java.version")} | ${System.getProperty("os.name")} " +
-                "${System.getProperty("os.version")} | user.dir=${System.getProperty("user.dir")}"
+                "${System.getProperty("os.version")} | user.dir=${System.getProperty("user.dir")} " +
+                "| pid=${handle.pid()} ppid=$parentPid"
         write("INFO", header)
         // The reason this exists: anything that ends the process must leave a trace.
         Thread.setDefaultUncaughtExceptionHandler { thread, err ->
             error("uncaught in ${thread.name}", err)
         }
+        // ...and this: exitProcess and a normal exit both run it, a hard kill does not,
+        // so a log that stops mid-scene says which of the two happened.
+        Runtime.getRuntime().addShutdownHook(Thread { write("INFO", "shutdown") })
         return target
     }
 
@@ -51,7 +57,7 @@ object Log {
         err?.let { write("ERROR", it.stackTraceToString().trimEnd()) }
     }
 
-    /** Open the log folder in Explorer (Settings page button). */
+    /** Open the log folder in Explorer — the tray menu's 打开日志 entry. */
     fun openFolder() {
         runCatching {
             val folder = file?.parentFile ?: return

@@ -43,7 +43,9 @@ class TrayController {
     private var leaveWatch: javax.swing.Timer? = null
 
     private var running = false
+    private var windowVisible = true
     private var onShow: () -> Unit = {}
+    private var onOpenLogs: () -> Unit = {}
     private var onOpenChat: () -> Unit = {}
     private var onStart: () -> Unit = {}
     private var onStop: () -> Unit = {}
@@ -51,14 +53,18 @@ class TrayController {
 
     fun update(
         running: Boolean,
+        windowVisible: Boolean,
         onShow: () -> Unit,
+        onOpenLogs: () -> Unit,
         onOpenChat: () -> Unit,
         onStart: () -> Unit,
         onStop: () -> Unit,
         onExit: () -> Unit,
     ) {
         this.running = running
+        this.windowVisible = windowVisible
         this.onShow = onShow
+        this.onOpenLogs = onOpenLogs
         this.onOpenChat = onOpenChat
         this.onStart = onStart
         this.onStop = onStop
@@ -141,7 +147,10 @@ class TrayController {
             panel.add(button)
         }
 
-        add(potString("显示窗口", "Show window")) { onShow() }
+        // Only useful while the window is hidden (user 2026-11-05: 仅在窗口未打开时才启用).
+        add(potString("显示窗口", "Show window"), enabled = !windowVisible) { onShow() }
+        // The only log entry (user 2026-11-05): it used to live on the Settings page.
+        add(potString("打开日志", "Open logs")) { onOpenLogs() }
         add(potString("打开聊天", "Open chat"), running) { onOpenChat() }
         if (running) {
             add(potString("停止宿主", "Stop host")) { onStop() }
