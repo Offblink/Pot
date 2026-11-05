@@ -145,3 +145,15 @@ def test_picking_a_session_leaves_the_scene(page, room):
     page.wait_for_selector("#scene-overlay:not(.hidden)")
     page.locator('.session-row[data-sid="chat-1"]').click()
     page.wait_for_selector("#scene-overlay.hidden", state="attached")
+
+
+def test_picking_the_open_session_leaves_the_scene_too(page, room):
+    """2026-11-06: the OPEN session's own card used to hit the hide/show toggle
+    behind the overlay — the click looked dead and the board never closed."""
+    page.locator('.session-row[data-sid="chat-1"]').click()
+    page.wait_for_selector("#messages .msg")  # chat-1 is the open session now
+    page.click("#btn-scene")
+    page.wait_for_selector("#scene-overlay:not(.hidden)")
+    page.locator('.session-row[data-sid="chat-1"]').click()  # same card, again
+    page.wait_for_selector("#scene-overlay.hidden", state="attached")
+    assert page.locator("#messages .msg").count() > 0  # records actually on screen

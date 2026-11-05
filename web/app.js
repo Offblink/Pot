@@ -117,6 +117,18 @@ async function closeCurrentSession() {
 }
 async function switchSession(id) {
   if (id === currentSessionId) {
+    // From the scene (2026-11-06): the open session's own card means "take me
+    // back to my conversation" — close the board and make sure the records are
+    // on screen. Without this the click hit the hide/show toggle behind the
+    // overlay and looked dead (焦点还在当前会话 → 早退，场景不关).
+    if (sceneIsOpen()) {
+      sceneClose();
+      if (sessionHidden) {
+        sessionHidden = false;
+        await reloadSessionFromServer();
+      }
+      return;
+    }
     // The open session's own card: alternate showing/hiding its records. The
     // user's rule (2026-10-31) — click to open, click again to hide, click again
     // to bring them back. (Was an early return + an unconditional pane wipe, so
