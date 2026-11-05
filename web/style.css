@@ -410,6 +410,13 @@ html.motion-on .agent-bubble{animation:none}
 .scene-agent.stuck{background:var(--error-text);border-color:var(--error-text);animation:scene-blink 1.1s steps(2,end) infinite}
 @keyframes scene-blink{50%{opacity:.4}}
 .scene-empty{position:absolute;left:50%;top:24%;transform:translate(-50%,-50%);color:var(--dim);font-size:var(--fs-sm)}
+/* 宣传片同款（2026-11-06 用户点名）：工位 → 任务板的虚线 + 流动圆点。
+   #scene-links 是 scene-floor 的第一个子节点（DOM 序在 bays/center 之下），
+   线尾被不透明的任务板卡片盖住 = 线插进板里；pointer-events:none 不挡点击。 */
+#scene-links{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#scene-links line{stroke:color-mix(in srgb,var(--accent) 70%,transparent);stroke-width:2;stroke-dasharray:5 9;stroke-linecap:round;opacity:.75}
+#scene-links .stuck line{stroke:var(--error-text)}
+.scene-flow{fill:var(--accent);stroke:var(--surface);stroke-width:1.5}
 /* 中心任务板：原版 todo 卡片样式的完成/未完成清单 */
 #scene-center{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(440px,46vw);max-height:56vh;background:var(--surface);border:2px solid var(--text);border-radius:var(--radius);padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;box-shadow:var(--shadow-card)}
 #scene-center-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-weight:600;font-size:var(--fs-sm)}

@@ -1348,16 +1348,23 @@ function sceneRenderBays() {
     }))
     .filter(x => x.busy.length);
   const n = busyBays.length;
-  if (!n) { wrap.innerHTML = `<div class="scene-empty">${T('scene.noAgents')}</div>`; return; }
+  if (!n) {
+    wrap.innerHTML = `<div class="scene-empty">${T('scene.noAgents')}</div>`;
+    sceneRenderLinks([]);
+    return;
+  }
   // 正 n 边形：顶点朝上（n=1 顶点在上，n=2 上下对置，n≥3 正多边形）
   const floor = sceneEl('scene-floor');
   const cx = floor.clientWidth / 2;
   const cy = floor.clientHeight / 2;
   const radius = Math.max(300, Math.min(floor.clientWidth, floor.clientHeight) * 0.4);
+  const links = [];
   wrap.innerHTML = busyBays.map((x, i) => {
     const angle = -Math.PI / 2 + (n === 1 ? 0 : (i * 2 * Math.PI) / n);
     const px = Math.round(cx + radius * Math.cos(angle));
     const py = Math.round(cy + radius * Math.sin(angle));
+    // 宣传片同款 feed line: bay → board; red only when every instance there is stuck
+    links.push({ px, py, stuck: !x.busy.some(s => s.status !== 'stuck') });
     const squares = x.busy.map(s =>
       `<button class="scene-agent${s.status === 'stuck' ? ' stuck' : ''}" data-sid="${escapeHtml(s.session)}"` +
       ` title="${escapeHtml(x.r.name || x.r.id)}#${s.number} · ${s.status === 'stuck' ? T('scene.stuck') : T('scene.working')}"></button>`
@@ -1365,6 +1372,31 @@ function sceneRenderBays() {
     return `<div class="scene-bay" style="left:${px}px;top:${py}px">` +
       `<div class="scene-bay-label">${escapeHtml(x.r.name || x.r.id)}</div>` +
       `<div class="scene-squares">${squares}</div></div>`;
+  }).join('');
+  sceneRenderLinks(links, cx, cy);
+}
+
+/* 宣传片同款（2026-11-06 用户点名「补一下」）：工位 → 任务板的虚线 + 源源
+   不断的流动圆点。SVG 垫在 bays/center 之下（DOM 序第一），线尾被任务板
+   卡片盖住 = 线插进板里。圆点走 SMIL animateMotion、负 begin 错相接力。
+   场景每 2s 轮询整块重绘 —— 不设签名门，动画会每 2 秒跳回起点。 */
+let sceneLinksSig = '';
+function sceneRenderLinks(links, cx, cy) {
+  const floor = sceneEl('scene-floor');
+  const sig = JSON.stringify([links, cx, cy, floor.clientWidth, floor.clientHeight]);
+  if (sig === sceneLinksSig) return;
+  sceneLinksSig = sig;
+  const motion = !(window.potMotion && window.potMotion.reduced);
+  sceneEl('scene-links').innerHTML = links.map(l => {
+    const path = `M${l.px} ${l.py}L${cx} ${cy}`;
+    const dots = motion && !l.stuck
+      ? [0, -0.9].map(begin =>
+          `<circle class="scene-flow" r="4.5">` +
+          `<animateMotion dur="1.8s" begin="${begin}s" repeatCount="indefinite" path="${path}"/></circle>`
+        ).join('')
+      : '';
+    return `<g class="scene-link${l.stuck ? ' stuck' : ''}">` +
+      `<line x1="${l.px}" y1="${l.py}" x2="${cx}" y2="${cy}"/>${dots}</g>`;
   }).join('');
 }
 
