@@ -479,3 +479,10 @@ html.motion-on .agent-bubble{animation:none}
    clear of it — and follow it when the sidebar collapses. */
 #scene-overlay{left:272px}
 body:has(#sidebar.collapsed) #scene-overlay{left:0}
+
+/* ---- drag & drop: the whole page is the drop zone (2026-11-06) ----
+   pointer-events:none — the affordance must never intercept the drop it
+   advertises; events pass through to the elements underneath. z-index sits
+   above the scene and the modals: a drop can arrive anywhere. */
+#drop-overlay{position:fixed;inset:0;z-index:150;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--accent) 10%,transparent);border:2px dashed var(--accent);backdrop-filter:blur(2px);pointer-events:none;color:var(--text);font-size:1.05rem;font-weight:600}
+#drop-overlay.hidden{display:none}

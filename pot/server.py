@@ -40,6 +40,7 @@ from pot.tools.mcp import mcp_extra_tools
 
 WEB_DIR = RESOURCE_ROOT / "web"
 PLANS_DIR = PROJECT_ROOT / "data" / "plans"  # one plan per session (裁决 17)
+UPLOADS_DIR = PROJECT_ROOT / "data" / "uploads"  # drag-and-drop files (2026-11-06)
 
 _mime = {
     ".html": "text/html; charset=utf-8",
@@ -819,6 +820,8 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._send_json({"id": session_id, "title": "(new session)"})
         elif url.path == "/pickfile":
             self._handle_pickfile()
+        elif url.path == "/upload":
+            self._handle_upload()
         elif url.path == "/open":
             self._handle_open()
         else:
@@ -978,6 +981,40 @@ class YesSirHandler(BaseHTTPRequestHandler):
             self._send_json({"path": path or None})
         except Exception as exc:
             self._send_json({"path": None, "error": str(exc)})
+
+    def _handle_upload(self) -> None:
+        """Drag-and-drop (2026-11-06): the body IS the file, saved under
+        data/uploads/<name>. Raw bytes on purpose — the stdlib has no multipart
+        parser, and a same-origin POST carries no CORS story. The name is
+        basenamed (both separators) so a crafted ?name= can never escape the
+        directory; the body streams to disk so a big drop costs no memory."""
+        name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+        safe = Path(name.replace("\\", "/")).name
+        safe = "".join(ch for ch in safe if ch not in '<>:"|?*' and ord(ch) >= 32).rstrip(". ")
+        if not safe or safe in (".", ".."):
+            self.close_connection = True  # the body stays unread: do not keep-alive
+            self._send_json({"error": "bad name"}, status=400)
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            self._send_json({"error": "empty body"}, status=400)
+            return
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        path = UPLOADS_DIR / safe
+        try:
+            remaining = length
+            with path.open("wb") as fh:
+                while remaining:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    remaining -= len(chunk)
+        except Exception:
+            with contextlib.suppress(OSError):
+                path.unlink()  # a torn drop is not a file
+            raise
+        self._send_json({"ok": True, "path": str(path)})
 
 
 # The runtime host-driven turns (role dispatch, job wakeups) run against: the

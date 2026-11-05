@@ -1034,12 +1034,67 @@ document.addEventListener('keydown', e => {
     retryTurn();
   }
 });
+function appendInput(text) {
+  input.value = (input.value ? input.value + ' ' : '') + text;
+  refreshSendButton();
+}
 document.getElementById('btn-browse').addEventListener('click', async () => {
   try {
     const r = await fetch('/pickfile', { method: 'POST' });
     const d = await r.json();
-    if (d.path) { input.value = (input.value ? input.value + ' ' : '') + d.path; input.focus(); }
+    if (d.path) { appendInput(d.path); input.focus(); }
   } catch (e) {}
+});
+
+/* ---- drag & drop: the whole page is the drop zone (2026-11-06) ----
+   A dropped file is a LOCAL File object POSTed raw to /upload — same origin,
+   so no CORS exists anywhere in this design — and its path lands in the input
+   exactly like the browse button's /pickfile. A dropped LINK is inserted as
+   text and never fetched here: a cross-origin fetch would be the only CORS
+   exposure, and fetching belongs to the host if it is ever wanted. */
+const dropOverlay = document.getElementById('drop-overlay');
+function dropIsFiles(e) {
+  return Array.from((e.dataTransfer && e.dataTransfer.types) || []).indexOf('Files') !== -1;
+}
+window.addEventListener('dragenter', e => {
+  if (!dropIsFiles(e)) return;
+  e.preventDefault();
+  dropOverlay.classList.remove('hidden');
+});
+window.addEventListener('dragover', e => {
+  if (!dropIsFiles(e)) return;
+  e.preventDefault(); // without this the browser opens/navigates to the drop
+  e.dataTransfer.dropEffect = 'copy';
+});
+window.addEventListener('dragleave', e => {
+  if (dropOverlay.classList.contains('hidden')) return;
+  if (e.relatedTarget && document.documentElement.contains(e.relatedTarget)) return;
+  dropOverlay.classList.add('hidden'); // left the window, not just a child
+});
+async function uploadDropped(file) {
+  try {
+    const r = await fetch('/upload?name=' + encodeURIComponent(file.name), { method: 'POST', body: file });
+    const d = await r.json();
+    if (!d.path) throw new Error(d.error || 'no path');
+    appendInput(d.path);
+  } catch (err) {
+    console.error('drop upload failed:', file.name, err);
+    setStatus(T('drop.failed'));
+  }
+}
+window.addEventListener('drop', e => {
+  const dt = e.dataTransfer;
+  if (!dt) return;
+  e.preventDefault(); // always — otherwise Chromium OPENS the dropped file
+  dropOverlay.classList.add('hidden');
+  const files = Array.from(dt.files || []);
+  if (files.length) {
+    (async () => { for (const f of files) await uploadDropped(f); input.focus(); })();
+    return;
+  }
+  const link = (dt.getData('text/uri-list') || dt.getData('text/plain') || '')
+    .split('\n')[0].trim();
+  if (link) { appendInput(link); input.focus(); }
 });
 /* The header's model dropdown (spec §66): it loads the list itself and reports a
    switch on the status line — which the next turn overwrites, hence the colour
