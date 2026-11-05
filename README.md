@@ -1,7 +1,7 @@
 # Pot
 
 **单机常驻角色 + 任务看板的本机 Agent 宿主。** 你给一句话目标，Planner 把它变成看板上的一张卡，
-常驻角色自己认领、执行、写回报，你只负责在「待验收」那一列点 ✓。
+常驻角色自己认领、执行、写回报——**报告即完成**；看板搬进了浏览器的俯视场景，人只在想重开时动一下。
 
 ![board](docs/images/board-zh.png)
 
@@ -13,18 +13,22 @@
 
 - **角色（Role）**：`planner` 是系统种下的主控，能把目标拆成卡片；`executor` 是干活的手。
   角色表在盘上（人掌权），可新建/编辑/删除；模板派生保证 agent 建的角色拿不到额外权限。
-- **看板（Board）**：六列——待规划 / 待办 / 进行中 / 待验收 / 已完成 / 受阻。
-  进「进行中」要拿租约，租约到期自动被规则收走；只有人能在「待验收」点 ✓ 或 ✗（退回必须写原因）。
-  列内新卡在上、每列只显示最近 12 张，更早的进归档（按日期分组、可按标签/角色筛，不删卡）；
-  卡片是一行紧凑卡，点开详情看描述/清单/报告/评论并在里面操作。
-- **聊天**：浏览器里的 WebUI（启动器「打开聊天」带 token 拉起），流式输出、工具卡、耗时读数、子代理卡。
+  同一角色可有多个**实例**（一实例一会话、各自 wip、编号 `#n`，裁决 33），满了自动增殖、到 `maxInstances` 为止。
+- **看板（Board）**：四态——待办 / 进行中 / 受阻 / 已完成（`待规划`、`待验收` 已退役，裁决 32）。
+  进「进行中」要拿租约，租约到期自动被规则收走；**报告即完成**（report 直达 done、清租约，holder 留作署名），
+  卡住时 Planner 用 `pot_board_reassign` 自主改派（裁决 34）。
+  看板本体在 WebUI 的**俯视场景**里（裁决 36）：正中是**任务板**——原版 todo 卡片样式的完成/未完成清单
+  （优先级点 + 标题 + 身份#编号，已完成划掉压暗），行点开详情（重开/删除）、＋ 建卡；有几种角色就画正几边形，
+  **工位隔间落在顶点上**，agent=像素方块+编号，卡住变红、没活就消失，点方块进它的临时会话视图。
+- **聊天与看板**：浏览器里的 WebUI（启动器「打开聊天」带 token 拉起），流式输出、工具卡、耗时读数；
+  顶栏「**看板**」按钮进俯视场景，多会话并发的卡全部聚合在这块板上。
 
 三个部件：
 
 | 部件 | 技术 | 位置 |
 |---|---|---|
 | 宿主 | Python 3.13 | `pot/` —— 看板引擎、角色、工具面、HTTP（hub + WebUI 同进程） |
-| 启动器 | Kotlin + Compose Multiplatform 1.12.2 | `launcher/` —— 看板页 / 设置 / 关于 / 托盘 / 宿主生命周期 |
+| 启动器 | Kotlin + Compose Multiplatform 1.12.2 | `launcher/` —— 角色页 / 设置 / 关于 / 托盘 / 宿主生命周期 |
 | 聊天界面 | 原生 JS（无构建） | `web/` —— 由宿主的 loopback 服务器直接发出 |
 
 ## 快速开始
@@ -41,7 +45,7 @@ python -m pot --web
 #    Pot WebUI: http://localhost:<port>
 #    Pot Hub:   http://127.0.0.1:<port>
 
-# 3. 或者起启动器（推荐：看板 + 托盘 + 一键拉起宿主）
+# 3. 或者起启动器（推荐：角色 + 托盘 + 一键拉起宿主）
 cd launcher
 gradle --no-daemon run          # 首次会拉 Compose 依赖；本机已有 9.5.0 缓存
 ```
@@ -54,10 +58,10 @@ gradle --no-daemon run          # 首次会拉 Compose 依赖；本机已有 9.5
 ## 看板怎么跑
 
 1. 顶栏「打开聊天」→ WebUI 里说一句话，例如「把 README 里过期的地方找出来」。
-2. Planner 建卡（可带标签/优先级/角色），卡片落「待办」。
-3. 角色按标签认领 → 「进行中」，拿租约（可续租）。
-4. 角色干完 → 写回报 → 「待验收」。
-5. 你在启动器里点 **✓ 完成**（或 **✗ 退回** 并写原因）；退回的原因进卡片评论，角色下次开工必读。
+2. Planner 建卡（可带标签/优先级/角色），卡片落「待办」；也可以在俯视场景的中心板上手动建卡。
+3. 角色实例按标签认领 → 「进行中」，拿租约；实例满 wip 会自动增殖（上限 `maxInstances`）。
+4. 角色干完 → 写回报 → **直接完成**（报告即完成）；报告以卡片块落进派它的那个会话。
+5. 想重做：任务板详情里**重开**（回待办、原因进评论）；卡住的卡由 Planner 自主改派（reason 进评论）。
 
 卡片必须自足：角色只看得到这张卡，看不到你的聊天上下文。
 
@@ -92,55 +96,55 @@ gradle --no-daemon run          # 首次会拉 Compose 依赖；本机已有 9.5
 
 ```mermaid
 stateDiagram-v2
-    [*] --> backlog: 人建卡
-    backlog --> todo: Planner 规划（canCreateCard）
-    todo --> doing: 角色 claim（拿租约）
-    doing --> review: report（必须写 summary）
+    [*] --> todo: 人建卡 / Planner 建卡
+    todo --> doing: 角色实例 claim（拿租约）
     doing --> blocked: 卡住
     blocked --> doing: 恢复
-    review --> doing: 打回重做（持有人）
-    review --> done: 人 ✓（agent 永远到不了）
-    review --> todo: 人 ✗ 退回（必须写原因）
+    blocked --> todo: Planner 改派（reassign）
+    doing --> done: report（报告即完成）
     doing --> todo: release / 租约到期
+    done --> todo: 人重开（原因进评论）
     done --> [*]
 ```
 
 - 进 `doing` 必须**持卡**（`already_held` 挡第二个认领者）。
-- 租约默认 **900 秒**，只在 `doing` 走；进 `review`/`blocked` 清空，回 `doing` 重挂。过期由看板的
-  清扫逻辑（Gate 7）退回 `todo`、清 holder、留一条系统评论；人也能手动续租。
-- **WIP** 是每个角色自己的配额（新建默认 2，系统种下的 `planner` 是 1），满了就 `wip_full`——并发是配额，不是自觉。
-- 写回报要有 summary（`need_summary`），退回要有原因（`need_reason`），勾清单要有证据（`need_evidence`）。
+- 租约默认 **900 秒**，只在 `doing` 走；进 `done`/`blocked` 清空，回 `doing` 重挂。过期由看板的
+  清扫逻辑退回 `todo`、清 holder、留一条系统评论；持有者续认领即续租。
+- **WIP 按实例计**（裁决 33：一实例一会话，`holder=role:session`）：每个实例新建默认 2、`planner` 是 1，
+  满了就 `wip_full`——并发是配额，不是自觉；实例满且到 `maxInstances` 上限时，卡留在待办等下一拍。
+- 写回报要有 summary（`need_summary`），勾清单要有证据（`need_evidence`），重开/改派要有原因（`need_reason`）。
 
-**七道闸**（全部在代码里，不是提示词里的约定；违反即拒，错误码就是契约）：
+**闸**（全部在代码里，不是提示词里的约定；违反即拒，错误码就是契约）：
 
 | 闸 | 规则 | 违反返回 |
 |---|---|---|
 | 角色匹配 | `labels ⊆ role.canClaim`，且卡片点名的角色对得上 | `role_mismatch` |
-| WIP | 该角色持有的卡数 < `wip` | `wip_full` |
+| WIP | **同一实例**持有的卡数 < `wip` | `wip_full` |
 | 持有保护 | 已有 holder 的卡不能被第三方抢 | `already_held` |
 | 乐观锁 | 写入必须带对 `ifVersion` | `stale_version` |
-| done 闸 | agent 永远到不了 `done`，最高到 `review`；`done` 只能人点 | `human_only` |
-| 退回 | 人 ✗ 退回 `todo`，原因写进卡片评论（角色开工前必读） | `need_reason` |
+| 报告即完成 | `report` 直达 `done`；`done` 不走 `move`（裁决 32） | `use_report` |
+| 重开 | 人把 `done` 退回 `todo`，原因写进卡片评论 | `need_reason` |
+| 改派 | 只有 Planner 能 `reassign`（换角色/退回，reason 进评论） | `planner_only` |
 | 租约 | 超时 → 自动回 `todo`、清 holder、评论留痕 | — |
 
 其余路径另有各自的码，同样会拒：`not_holder`（不是持有者却想改）、`bad_transition` / `bad_status`
 （状态机里没有这条边）、`cant_create`（没有建卡权）、`need_summary` / `need_evidence` / `need_text`
-（回报、清单证据、退回原因缺失）、`no_such_card` / `no_such_role`。
+（回报、清单证据缺失）、`no_such_card` / `no_such_role`。
 
 **并发**：每张卡带 `ifVersion`，每次写入都要带上你看到的版本，过了就 `stale_version` 打回，界面回到
-真实数据而不是幽灵状态；存储是 sqlite WAL + 每次操作一个 `BEGIN IMMEDIATE`，所以「8 个角色抢 40 张卡」
+真实数据而不是幽灵状态；存储是 sqlite WAL + 每次操作一个 `BEGIN IMMEDIATE`，所以「8 个线程抢 40 张卡」
 在压测里恰好一个赢家。
 
-**人掌权的地方**只有四处：✓ 完成、✗ 退回（必须写原因）、改派/删除、角色的定义与权限。其余全部可由
-角色自己推进。
+**人掌权的地方**只有三处：角色的定义与权限、场景里的建卡/重开/删除、以及一切「谁能干什么」的配置。
+其余全部由角色自己推进；改派是 Planner 的特权（`planner_only`），人要干预就重开或改角色配置。
 
-为什么 `done` 一定得人点：**不让 agent 给自己判卷**。它能自己验收的话，「做完」就退化成「它认为做完」，
-看板也就不再提供外部确认。想放宽时按卡分级（机械可判定的卡带证据自动过闸），而不是拆掉这道闸。
+报告即完成为什么还敢干：**交付物是结构化的**（summary、清单证据、报告原文都落盘在卡上），完成态对
+所有人可见，重开始终在人手里——判卷错了的代价从「挡住流程」变成「一眼可纠、一键重来」。
 
-**事件驱动**：每一轮结束时宿主做三件事——补投这轮跑着时完成的后台作业、把新可认领的卡派给空闲的
-角色会话、卡进入 `review` 时把报告**直接写成卡片块落进派它的那个会话**（host 直写、不叫模型；只有
-该会话派出的卡才回该会话，人工卡只在看板上等你验收——裁决 30/31）。所以工作不依赖「某一轮对话还
-活着」：这一轮结束了，卡还在盘上，下一个认领者从卡本身开始干。
+**事件驱动**：每一轮结束时宿主做三件事——补投这轮跑着时完成的后台作业（内部 note，渲染层不显示——裁决 35）、
+把新可认领的卡派给空闲的角色实例（含自动增殖）、卡**完成**时把报告**直接写成卡片块落进派它的那个会话**
+（host 直写、不叫模型；只有该会话派出的卡才回该会话，人工卡只在看板上显示、聊天零打扰——裁决 30/31）。
+所以工作不依赖「某一轮对话还活着」：这一轮结束了，卡还在盘上，下一个认领者从卡本身开始干。
 
 ## 和传统做法比
 
@@ -153,7 +157,7 @@ stateDiagram-v2
 | 工作状态 | 在对话上下文里，轮次结束即消失 | 在 sqlite 里的一行，跨轮次、跨进程存活 |
 | 并发 | 一次消息里的多个 tool call | 多角色各自持卡，受 WIP 与租约约束 |
 | 长任务 | 要么阻塞这一轮，要么被 abort 丢掉 | 进入 `doing` 有租约，进程重启后仍在 |
-| 人的位置 | 只能在中途插一句（ask 卡）或等结束 | 在 `review` 这一列做验收，之前不打扰 |
+| 人的位置 | 只能在中途插一句（ask 卡）或等结束 | 之前零打扰；报告即完成，重开才需要人 |
 | 失败 | 一句错误文本 | 卡进 `blocked`，退回原因写进评论，下次开工必读 |
 | 可观测 | 读转录 | 看板就是状态；每张卡有版本、持有者、租约、评论 |
 
@@ -169,7 +173,7 @@ subagent 的分工是**调用者临时决定**：父代理 `spawn(layer, goal, r
 | 工作单元 | 一次调用 + 一个字符串返回值 | 一张卡：状态、标签、租约、评论、报告、版本 |
 | 交接 | 只能同步等，或后台跑完唤醒父代理 | 任何符合标签的角色都能认领；原会话不在也照跑 |
 | 并行 | 父代理 spawn N 个然后等 | 各角色按 WIP 配额并行，卡不需要同一个父上下文 |
-| 人的介入 | 事后读子代理的转录 | 在验收列做决定，退回原因结构化地回到卡上 |
+| 人的介入 | 事后读子代理的转录 | 报告以卡片块自动落进派它的会话；重开/改派原因结构化地回到卡上 |
 | 失败 | 变成一个失败的工具调用 | 卡被退回/阻塞，原因和状态都留在盘上 |
 
 一句话：subagent 是**一次性的调用**；看板是**可被接管的工作**。Pot 里 Planner 只写卡不干活，活由
@@ -194,26 +198,16 @@ launcher/       CMP 启动器（Kotlin；Standalone Gradle build）
 web/            浏览器 WebUI（index.html + app.js/common.js/i18n.js/motion.js/style.css）
 tests/          pytest（含 Playwright 真浏览器用例）
 docs/           spec.md（v1.0 定稿，唯一权威）+ images/
-scripts/        launcher-click-complete.ps1（UI 验收点击）、dump_prompts.py、check.ps1
+scripts/        dump_prompts.py、check.ps1
 ```
 
 ## 开发与门禁
 
 ```powershell
 python -m ruff check . && python -m ruff format --check .
-$env:PYTHONIOENCODING="utf-8"; python -m pytest tests -q     # 486 passed
+$env:PYTHONIOENCODING="utf-8"; python -m pytest tests -q     # 含 Playwright 真浏览器用例（俯视场景 e2e）
 cd launcher; gradle --no-daemon compileKotlin                # 启动器编译
 ```
-
-UI 验收脚本（需启动器已跑、且「待验收」列里有卡）：
-
-```powershell
-powershell -File scripts/launcher-click-complete.ps1 -DryRun   # 只报坐标
-powershell -File scripts/launcher-click-complete.ps1           # 真点
-```
-
-它不写死像素：按调色板主色（浅色 `#15803D` / 深色 `#4ADE80`）在页头下方找药丸大小的实心块，
-窗口移动或缩放都不影响。
 
 ## 现状与边界（v0.1）
 

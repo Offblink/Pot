@@ -24,8 +24,6 @@ class PotState(
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    var cards by mutableStateOf<List<JSONObject>>(emptyList())
-        private set
     var roles by mutableStateOf<List<JSONObject>>(emptyList())
         private set
     var snack by mutableStateOf("")
@@ -37,15 +35,15 @@ class PotState(
     }
 
     fun refreshBoard() {
+        // 裁决 37: the launcher only renders roles now — cards live in the
+        // WebUI scene, which reads the host's /board directly.
         if (host.status != HostStatus.RUNNING) {
-            cards = emptyList()
             roles = emptyList()
             return
         }
         scope.launch {
             runCatching {
                 val j = host.hubGet("/api/board")
-                cards = j.optJSONArray("cards")?.objList() ?: emptyList()
                 roles = j.optJSONArray("roles")?.objList() ?: emptyList()
             }
         }
@@ -93,63 +91,6 @@ class PotState(
             }
             refreshBoard()
         }
-    }
-
-    fun createCard(
-        title: String,
-        desc: String,
-        labels: List<String>,
-        priority: String,
-        role: String?,
-    ) = act {
-        val body = JSONObject().put("title", title).put("desc", desc).put("priority", priority)
-        if (labels.isNotEmpty()) body.put("labels", labels.toJsonArray())
-        if (role != null) body.put("role", role)
-        host.hubPost("/api/board/create", body)
-    }
-
-    fun complete(card: JSONObject) = act {
-        host.hubPost(
-            "/api/board/complete",
-            JSONObject().put("card_id", card.getString("id")).put("if_version", card.getInt("ifVersion")),
-        )
-    }
-
-    fun reject(
-        card: JSONObject,
-        reason: String,
-    ) = act {
-        host.hubPost(
-            "/api/board/reject",
-            JSONObject()
-                .put("card_id", card.getString("id"))
-                .put("reason", reason)
-                .put("if_version", card.getInt("ifVersion")),
-        )
-    }
-
-    fun assign(
-        card: JSONObject,
-        role: String?,
-    ) = act {
-        val body =
-            JSONObject().put("card_id", card.getString("id")).put("if_version", card.getInt("ifVersion"))
-        if (role == null) body.put("role", JSONObject.NULL) else body.put("role", role)
-        host.hubPost("/api/board/assign", body)
-    }
-
-    fun renew(card: JSONObject) = act {
-        host.hubPost(
-            "/api/board/renew",
-            JSONObject().put("card_id", card.getString("id")).put("if_version", card.getInt("ifVersion")),
-        )
-    }
-
-    fun deleteCard(card: JSONObject) = act {
-        host.hubPost(
-            "/api/board/delete",
-            JSONObject().put("card_id", card.getString("id")).put("if_version", card.getInt("ifVersion")),
-        )
     }
 
     // ── roles (human-only privilege ground, spec §3.1) ──

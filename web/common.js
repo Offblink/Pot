@@ -58,7 +58,8 @@
     );
   }
   function getSessionTitle(list, wrap, keep) {
-    const u = (list || []).find(m => m.role === 'user');
+    // 裁决 35: a host note is not the user's words and never titles a row.
+    const u = (list || []).find(m => m.role === 'user' && !m.internal);
     if (!u) return T('session.emptyTitle');
     const t = String(u.content).replace(/\s+/g, ' ').trim();
     return t.length > wrap ? t.slice(0, keep) + '...' : t;
@@ -996,6 +997,7 @@
       else if (rec) askQueue.push(rec);
     });
     for (const m of messages || []) {
+      if (m.internal) continue; // 裁决 35: host notes are model-only, never a row
       if (m.role === 'user') {
         /* Which side a row sits on is the *shell's* question, not the row's
            (§59): the desktop page is the computer, the phone page is the phone,

@@ -20,6 +20,7 @@
   <div id="header">
     <button id="hamburger-sidebar" data-i18n-title="ui.toggleSidebar" title="展开/收起侧栏">&#x2630;</button>
     <span class="dot"></span><strong>Pot</strong><button type="button" id="model-select" data-i18n-title="ui.modelTitle" title="当前模型：点开换一个，换完自动测一次调用"></button>
+    <button type="button" id="btn-scene" data-i18n-title="scene.btnTitle" title="俯视看板场景">&#x25A6;<span class="btn-scene-label" data-i18n="scene.btn">看板</span></button>
     <span id="tok-rate" data-i18n-title="ui.rateTitle" title="输出速率：每秒输出 token 数（流式 chunk ≈ 1 token，文字与思考都算）；停笔后停在最后一个数，新建对话才清空"></span>
     <div id="theme-switch" class="theme-switch" data-i18n-title="ui.themeTitle" title="切换深浅主题">
       <svg class="theme-ic theme-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
@@ -45,6 +46,46 @@
     <button id="send" data-i18n="ui.send">发送</button>
   </div>
 </div>
+</div>
+<div id="scene-overlay" class="hidden" aria-hidden="true">
+  <div id="scene">
+    <div id="scene-floor">
+      <div id="scene-bays"></div>
+      <div id="scene-center">
+        <div id="scene-center-head"><span data-i18n="scene.center">任务板</span><span id="scene-center-count">0</span><button id="scene-add" type="button" data-i18n-title="scene.add" title="新建卡片">＋</button></div>
+        <div id="scene-list"></div>
+      </div>
+    </div>
+  </div>
+  <div id="scene-todo-modal" class="scene-modal hidden">
+    <div class="scene-modal-card">
+      <div class="scene-modal-head"><span data-i18n="scene.newCard">新建卡片</span><button class="scene-modal-close" data-close="scene-todo-modal">&times;</button></div>
+      <div class="scene-form">
+        <input id="nc-title" data-i18n-placeholder="scene.ncTitle" placeholder="标题（目标一句话）">
+        <input id="nc-labels" data-i18n-placeholder="scene.ncLabels" placeholder="标签，逗号分隔（如 coding）">
+        <div class="scene-form-row">
+          <select id="nc-priority"><option value="normal">normal</option><option value="urgent">urgent</option><option value="low">low</option></select>
+          <select id="nc-role"></select>
+        </div>
+        <textarea id="nc-desc" rows="4" data-i18n-placeholder="scene.ncDesc" placeholder="描述（可选）"></textarea>
+        <button id="nc-create" class="scene-primary" data-i18n="scene.create">建卡</button>
+      </div>
+    </div>
+  </div>
+  <div id="scene-detail-modal" class="scene-modal hidden">
+    <div class="scene-modal-card wide">
+      <div class="scene-modal-head"><span id="sd-title"></span><button class="scene-modal-close" data-close="scene-detail-modal">&times;</button></div>
+      <div id="sd-body"></div>
+      <div id="sd-actions"></div>
+    </div>
+  </div>
+  <div id="scene-agent-modal" class="scene-modal hidden">
+    <div class="scene-modal-card wide">
+      <div class="scene-modal-head"><span id="sa-title"></span><button class="scene-modal-close" data-close="scene-agent-modal">&times;</button></div>
+      <div id="sa-cards"></div>
+      <div id="sa-transcript"></div>
+    </div>
+  </div>
 </div>
 <div id="confirm-overlay"><div id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
   <h2 id="confirm-title"></h2>

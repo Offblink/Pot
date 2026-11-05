@@ -227,7 +227,7 @@ fun main() = application {
             ) { insets ->
                 Box(Modifier.padding(insets).fillMaxSize()) {
                     when (page) {
-                        0 -> BoardPage(state, settings)
+                        0 -> BoardPage(state)
                         1 -> SettingsPage(state, host, settings)
                         else -> AboutPage(host)
                     }
@@ -255,7 +255,7 @@ private fun TopBar(
             Text("Pot", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = p.fg)
             StatusBadge(host)
             Box(Modifier.padding(horizontal = 10.dp))
-            NavPill(Strings.t("看板", "Board"), page == 0) { onPage(0) }
+            NavPill(Strings.t("角色", "Roles"), page == 0) { onPage(0) }
             NavPill(Strings.t("设置", "Settings"), page == 1) { onPage(1) }
             NavPill(Strings.t("关于", "About"), page == 2) { onPage(2) }
             androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))

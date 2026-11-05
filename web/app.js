@@ -12,6 +12,7 @@ let sessionHidden = false; // the open session's records are toggled hidden (car
 
 function setCurrentSession(id) {
   currentSessionId = id;
+  sceneMaybeClose(); // 裁决 36: picking a conversation leaves the scene
   try { if (id) localStorage.setItem('pot-session', id); else localStorage.removeItem('pot-session'); } catch (e) {}
   refreshSendButton(); // send vs retry depends on the session (shuttle always sends)
   startJobsPoll(); // jobs 芯片: one interval per open session, torn down on close/switch
@@ -1201,3 +1202,294 @@ Alerts.start();
 
 /* ---------- input composer (the session shell) ---------- */
 
+
+/* ---------- scene (裁决 36, 同日修订): 俯视看板 ----------
+   Two things only: the task board dead-center — the original todo-card list
+   showing undone AND done — and one bay per agent type on the vertices of a
+   regular polygon around it (工位). Pixel agent squares: red = stuck, gone =
+   idle, click = temp transcript view. One /board poll carries every session's
+   cards, so concurrent conversations aggregate here (全会话统计). */
+let sceneData = { cards: [], roles: [], instances: [] };
+let sceneTimer = null;
+
+function sceneEl(id) { return document.getElementById(id); }
+function sceneIsOpen() { const o = sceneEl('scene-overlay'); return !!o && !o.classList.contains('hidden'); }
+function sceneMaybeClose() { if (sceneIsOpen()) sceneClose(); }
+function sceneCard(id) { return sceneData.cards.find(c => c.id === id); }
+
+function sceneInstLabel(holder) {
+  if (!holder) return '—';
+  const i = holder.indexOf(':');
+  const rid = i < 0 ? holder : holder.slice(0, i);
+  const sid = i < 0 ? '' : holder.slice(i + 1);
+  const inst = sceneData.instances.find(x => x.role === rid && x.session === sid);
+  return inst ? `${rid}#${inst.number}` : rid;
+}
+
+function sceneOpen() {
+  sceneEl('scene-overlay').classList.remove('hidden');
+  sceneEl('scene-overlay').setAttribute('aria-hidden', 'false');
+  scenePoll();
+  if (!sceneTimer) sceneTimer = setInterval(scenePoll, 2000);
+}
+function sceneClose() {
+  sceneEl('scene-overlay').classList.add('hidden');
+  sceneEl('scene-overlay').setAttribute('aria-hidden', 'true');
+  if (sceneTimer) { clearInterval(sceneTimer); sceneTimer = null; }
+  ['scene-todo-modal', 'scene-detail-modal', 'scene-agent-modal'].forEach(id => sceneEl(id).classList.add('hidden'));
+}
+async function scenePoll() {
+  try {
+    const r = await fetch('/board');
+    if (!r.ok) return;
+    sceneData = await r.json();
+    if (sceneIsOpen()) sceneRender();
+  } catch (e) { /* host down: keep the last frame */ }
+}
+function sceneRender() { sceneRenderBays(); sceneRenderCenter(); }
+
+function sceneRenderBays() {
+  const wrap = sceneEl('scene-bays');
+  const byRole = {};
+  (sceneData.instances || []).forEach(i => { (byRole[i.role] = byRole[i.role] || []).push(i); });
+  const roles = (sceneData.roles || []).filter(r => !r.isTemplate && r.id !== 'planner');
+  const busyBays = roles
+    .map(r => ({
+      r,
+      busy: (byRole[r.id] || [])
+        .filter(i => i.status !== 'idle')              // 无任务的 agent 从场景消失
+        .sort((a, b) => a.number - b.number),
+    }))
+    .filter(x => x.busy.length);
+  const n = busyBays.length;
+  if (!n) { wrap.innerHTML = `<div class="scene-empty">${T('scene.noAgents')}</div>`; return; }
+  // 正 n 边形：顶点朝上（n=1 顶点在上，n=2 上下对置，n≥3 正多边形）
+  const floor = sceneEl('scene-floor');
+  const cx = floor.clientWidth / 2;
+  const cy = floor.clientHeight / 2;
+  const radius = Math.max(300, Math.min(floor.clientWidth, floor.clientHeight) * 0.4);
+  wrap.innerHTML = busyBays.map((x, i) => {
+    const angle = -Math.PI / 2 + (n === 1 ? 0 : (i * 2 * Math.PI) / n);
+    const px = Math.round(cx + radius * Math.cos(angle));
+    const py = Math.round(cy + radius * Math.sin(angle));
+    const squares = x.busy.map(s =>
+      `<button class="scene-agent${s.status === 'stuck' ? ' stuck' : ''}" data-sid="${escapeHtml(s.session)}"` +
+      ` title="${escapeHtml(x.r.name || x.r.id)}#${s.number} · ${s.status === 'stuck' ? T('scene.stuck') : T('scene.working')}"></button>`
+    ).join('');
+    return `<div class="scene-bay" style="left:${px}px;top:${py}px">` +
+      `<div class="scene-bay-label">${escapeHtml(x.r.name || x.r.id)}</div>` +
+      `<div class="scene-squares">${squares}</div></div>`;
+  }).join('');
+}
+
+function sceneRenderCenter() {
+  const order = { blocked: 0, doing: 1, todo: 2, done: 3 };
+  const cards = sceneData.cards.slice().sort((a, b) =>
+    (order[a.status] ?? 9) - (order[b.status] ?? 9) || (b.updatedAt || 0) - (a.updatedAt || 0));
+  sceneEl('scene-center-count').textContent = String(cards.filter(c => c.status !== 'done').length);
+  sceneEl('scene-list').innerHTML = cards.map(c => {
+    const done = c.status === 'done';
+    const meta = c.status === 'blocked' ? T('scene.stuck')
+      : done || c.status === 'doing' ? sceneInstLabel(c.holder)
+      : (c.role || '');
+    const metaCls = c.status === 'blocked' ? ' stuck' : '';
+    return `<div class="scene-card${done ? ' done' : ''}" data-card="${escapeHtml(c.id)}">` +
+      `<span class="scene-dot ${escapeHtml(c.priority || 'normal')}"></span>` +
+      `<span class="scene-card-title">${escapeHtml(c.title)}</span>` +
+      `<span class="scene-card-meta${metaCls}">${escapeHtml(meta)}</span></div>`;
+  }).join('') || `<div class="scene-none">${T('scene.none')}</div>`;
+}
+
+/* ---- detail (裁决 36: list rows open it; 重开/删除 live here) ---- */
+function sceneShowDetail(cardId) {
+  const c = sceneCard(cardId);
+  if (!c) return;
+  sceneEl('sd-title').textContent = `${c.id} · ${c.title}`;
+  const chk = (c.checklist || []).map(it =>
+    `<div class="scene-chk${it.done ? ' done' : ''}">${it.done ? '✓' : '○'} ${escapeHtml(it.text)}` +
+    `${it.evidence ? ` <span class="scene-ev">${escapeHtml(it.evidence)}</span>` : ''}</div>`
+  ).join('');
+  let rep = '';
+  if (c.report) {
+    const files = (c.report.files || []).length
+      ? `<div class="scene-files">${c.report.files.map(f => `<code>${escapeHtml(f)}</code>`).join(' ')}</div>` : '';
+    rep = `<div class="scene-sec">${T('scene.report')}</div>` +
+      `<div class="scene-report">${marked.parse(String(c.report.summary || ''))}${files}</div>`;
+  }
+  const cms = (c.comments || []).map(cm =>
+    `<div class="scene-cmt"><b>${escapeHtml(cm.by)}</b> · ${new Date((cm.at || 0) * 1000).toLocaleString()}` +
+    `<br>${escapeHtml(cm.text)}</div>`
+  ).join('');
+  const labels = (c.labels || []).length
+    ? `<div class="scene-meta">${c.labels.map(l => `<span class="scene-chip lab">${escapeHtml(l)}</span>`).join('')}</div>` : '';
+  sceneEl('sd-body').innerHTML =
+    `<div class="scene-meta">` +
+      `<span class="scene-chip st-${escapeHtml(c.status)}">${T('scene.st_' + c.status)}</span>` +
+      `<span class="scene-chip">${escapeHtml(c.priority || '')}</span>` +
+      (c.role ? `<span class="scene-chip">${escapeHtml(c.role)}</span>` : '') +
+      `<span class="scene-chip">${escapeHtml(sceneInstLabel(c.holder))}</span>` +
+    `</div>${labels}` +
+    (c.desc ? `<div class="scene-sec">${T('scene.desc')}</div><div class="scene-desc">${marked.parse(c.desc)}</div>` : '') +
+    (chk ? `<div class="scene-sec">${T('scene.checklist')}</div>${chk}` : '') +
+    rep +
+    (cms ? `<div class="scene-sec">${T('scene.comments')}</div>${cms}` : '');
+  sceneRenderDetailActions(c);
+  sceneEl('scene-detail-modal').classList.remove('hidden');
+}
+
+function sceneRenderDetailActions(c) {
+  const bar = sceneEl('sd-actions');
+  const del = `<button class="scene-act danger" data-act="delete">${T('scene.delete')}</button>`;
+  if (c.status === 'done') {
+    bar.innerHTML = `<button class="scene-act" data-act="reopen">${T('scene.reopen')}</button>${del}`;
+  } else {
+    bar.innerHTML = del;
+  }
+  bar.onclick = e => {
+    const act = e.target.closest('[data-act]');
+    if (!act) return;
+    if (act.dataset.act === 'delete') {
+      showConfirm({
+        title: T('scene.delete'), message: T('scene.confirmDelete'), danger: true,
+        onConfirm: async () => {
+          try {
+            await scenePost('/board/delete', { card_id: c.id, if_version: c.ifVersion });
+            sceneEl('scene-detail-modal').classList.add('hidden');
+            scenePoll();
+          } catch (err) { sceneActionError(err); }
+        },
+      });
+    } else if (act.dataset.act === 'reopen') {
+      bar.innerHTML = `<input id="sd-reason" placeholder="${escapeHtml(T('scene.reason'))}">` +
+        `<button class="scene-act primary" data-act="confirm-reopen">${T('scene.confirmReopen')}</button>` +
+        `<button class="scene-act" data-act="cancel">${T('scene.close')}</button>`;
+      const box = sceneEl('sd-reason');
+      if (box) box.focus();
+    } else if (act.dataset.act === 'confirm-reopen') {
+      const reason = (sceneEl('sd-reason') || {}).value || '';
+      if (!reason.trim()) return;
+      scenePost('/board/reopen', { card_id: c.id, reason: reason.trim(), if_version: c.ifVersion })
+        .then(() => { sceneEl('scene-detail-modal').classList.add('hidden'); scenePoll(); })
+        .catch(sceneActionError);
+    } else if (act.dataset.act === 'cancel') {
+      sceneRenderDetailActions(c);
+    }
+  };
+}
+
+function sceneActionError(err) {
+  const bar = sceneEl('sd-actions');
+  const note = document.createElement('span');
+  note.className = 'scene-none';
+  note.textContent = String(err && err.message || err);
+  bar.prepend(note);
+  setTimeout(() => note.remove(), 4000);
+}
+
+async function scenePost(path, body) {
+  const r = await fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || d.error) throw new Error(d.error || String(r.status));
+  return d;
+}
+
+/* ---- agent click: temp transcript view (role sessions never hit the sidebar) ---- */
+async function sceneShowAgent(sid) {
+  const inst = (sceneData.instances || []).find(i => i.session === sid);
+  if (!inst) return;
+  const state = inst.status === 'stuck' ? T('scene.stuck')
+    : inst.status === 'working' ? T('scene.working') : T('scene.idle');
+  sceneEl('sa-title').textContent = `${inst.role}#${inst.number} · ${state}`;
+  const held = (inst.cards || []).map(sceneCard).filter(Boolean);
+  sceneEl('sa-cards').innerHTML = held.map(c =>
+    `<div class="scene-row${c.status === 'blocked' ? ' stuck' : ''}" data-card="${escapeHtml(c.id)}">` +
+    `<span class="scene-row-title">${escapeHtml(c.title)}</span>` +
+    `<span class="scene-row-state" style="color:var(--dim)">${T('scene.st_' + c.status)}</span></div>`
+  ).join('');
+  const tr = sceneEl('sa-transcript');
+  tr.innerHTML = `<div class="scene-none">…</div>`;
+  sceneEl('scene-agent-modal').classList.remove('hidden');
+  try {
+    const r = await fetch('/session?id=' + encodeURIComponent(sid));
+    const d = await r.json();
+    tr.innerHTML = '';
+    (d.messages || []).forEach(m => {
+      if (m.role === 'system' || m.internal) return;   // 裁决 35: host notes never render
+      const el = document.createElement('div');
+      if (m.role === 'assistant' && !m.tool_calls) {
+        el.className = 'scene-msg assistant';
+        el.innerHTML = marked.parse(FC.stripSilent(String(m.content || '')));
+      } else if (m.role === 'user') {
+        el.className = 'scene-msg user';
+        el.textContent = String(m.content || '');
+      } else if (m.role === 'tool') {
+        el.className = 'scene-msg tool';
+        el.textContent = String(m.content || '').slice(0, 400);
+      } else return;
+      tr.appendChild(el);
+    });
+    if (!tr.children.length) tr.innerHTML = `<div class="scene-none">${T('scene.noMsgs')}</div>`;
+  } catch (e) {
+    tr.innerHTML = `<div class="scene-none">${T('scene.noMsgs')}</div>`;
+  }
+}
+
+/* ---- create (裁决 37: the launcher lost its board; the center board is home now) ---- */
+function sceneOpenCreate() {
+  sceneEl('nc-role').innerHTML = `<option value="">${T('scene.anyRole')}</option>` +
+    (sceneData.roles || []).filter(r => !r.isTemplate && r.id !== 'planner')
+      .map(r => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.name || r.id)}</option>`).join('');
+  sceneEl('nc-title').value = '';
+  sceneEl('nc-labels').value = '';
+  sceneEl('nc-desc').value = '';
+  sceneEl('scene-todo-modal').classList.remove('hidden');
+  sceneEl('nc-title').focus();
+}
+async function sceneCreateCard() {
+  const title = (sceneEl('nc-title').value || '').trim();
+  if (!title) { sceneEl('nc-title').focus(); return; }
+  const labels = (sceneEl('nc-labels').value || '').split(',').map(s => s.trim()).filter(Boolean);
+  const role = sceneEl('nc-role').value || null;
+  try {
+    await scenePost('/board/create', {
+      title, labels, role,
+      priority: sceneEl('nc-priority').value,
+      desc: sceneEl('nc-desc').value || '',
+    });
+    sceneEl('scene-todo-modal').classList.add('hidden');
+    scenePoll();
+  } catch (err) { sceneActionError(err); }
+}
+
+/* ---- wiring ---- */
+document.getElementById('btn-scene').addEventListener('click', () => {
+  if (sceneIsOpen()) sceneClose(); else sceneOpen();
+});
+sceneEl('scene-add').addEventListener('click', () => sceneOpenCreate());
+sceneEl('scene-bays').addEventListener('click', e => {
+  const sq = e.target.closest('.scene-agent');
+  if (sq) sceneShowAgent(sq.dataset.sid);
+});
+sceneEl('scene-list').addEventListener('click', e => {
+  const row = e.target.closest('.scene-card[data-card]');
+  if (row) sceneShowDetail(row.dataset.card);
+});
+sceneEl('sa-cards').addEventListener('click', e => {
+  const row = e.target.closest('.scene-row[data-card]');
+  if (row) sceneShowDetail(row.dataset.card);
+});
+sceneEl('nc-create').addEventListener('click', sceneCreateCard);
+document.querySelectorAll('.scene-modal-close').forEach(b => {
+  b.addEventListener('click', () => sceneEl(b.dataset.close).classList.add('hidden'));
+});
+window.addEventListener('resize', () => { if (sceneIsOpen()) sceneRender(); });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !sceneIsOpen()) return;
+  if (document.getElementById('confirm-overlay').classList.contains('show')) return;
+  const openModal = ['scene-agent-modal', 'scene-detail-modal', 'scene-todo-modal']
+    .map(sceneEl).find(m => !m.classList.contains('hidden'));
+  if (openModal) { openModal.classList.add('hidden'); return; }
+  sceneClose();
+});

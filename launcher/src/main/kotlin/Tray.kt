@@ -266,7 +266,7 @@ class TrayController {
     }
 
     private fun trayTooltip(): String =
-        potString("Pot — 看板/设置/打开聊天", "Pot — board / settings / open chat")
+        potString("Pot — 角色/设置/打开聊天", "Pot — roles / settings / open chat")
 
     private fun potString(
         zh: String,
