@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -102,6 +103,28 @@ def test_dispatch_grows_instances_up_to_max(env):
     assert len(sids) == 2
     assert sorted(int(session.load_session(sid)["instance"]) for sid in sids) == [1, 2]
     assert len(env.board.list(status="todo")) == 1  # the third card waits its turn
+
+
+def test_dispatch_wave_runs_instances_concurrently(env):
+    """裁决 39: two claimable cards reach two DIFFERENT instances in the same
+    wave — the barrier only trips with both turns in flight together, so a
+    serial dispatcher would time out and fail the assertions below."""
+    env.roles.create(
+        {"id": "bot", "name": "Bot", "canClaim": ["special"], "wip": 1, "maxInstances": 3},
+        "human",
+    )
+    _card(env, title="a", labels=["special"])
+    _card(env, title="b", labels=["special"])
+    barrier = threading.Barrier(2, timeout=10)
+    calls: list[tuple[str, str]] = []
+
+    def run_turn(sid: str, msg: str) -> None:
+        calls.append((sid, msg))
+        barrier.wait()  # both turns must be running simultaneously to pass
+
+    assert dispatch.dispatch_pending(run_turn) == 2
+    assert len(calls) == 2
+    assert len({sid for sid, _ in calls}) == 2  # one instance per card, not #1 twice
 
 
 def test_dispatch_runs_one_turn_in_the_matching_role_session(env):

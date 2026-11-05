@@ -13,6 +13,7 @@ runs inside `pot_board_claim`; this pass only decides whose turn to wake.
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from pot import runlog, session
 from pot.board import Board
@@ -45,6 +46,10 @@ _PLANNER_SEED = {
 _SINGLETONS: dict = {}
 _CREATE_LOCK = threading.RLock()
 _CYCLE = threading.Lock()
+# 裁决 39: concurrent model turns per cycle. Covers one role's default three
+# instances plus one; queued plans still run inside the same cycle (joined
+# before _CYCLE releases), this only bounds simultaneous API calls.
+_MAX_PARALLEL = 4
 
 
 def roles_repo() -> RoleRepo:
@@ -144,11 +149,14 @@ def _held_by_instance(cards: list[dict], role_id: str, session_id: str) -> int:
     return sum(1 for c in cards if c.get("holder") == holder and c.get("status") != "done")
 
 
-def _next_claimable(seen: set[str]) -> tuple[dict, Role, str | None] | None:
+def _next_claimable(seen: set[str], busy: set[str]) -> tuple[dict, Role, str | None] | None:
     """First unvisited todo card an instance may take; urgent cards first.
 
     Returns (card, role, instance) — instance None means "no live instance has
     a free slot and the role may still grow one" (裁决 33 auto-growth).
+    `busy` = instances already planned this cycle (裁决 39): they count as full
+    before their turn claims anything, which is what spreads a wave across
+    numbered instances instead of stacking every brief on #1.
     """
     b = board()
     repo = roles_repo()
@@ -169,6 +177,8 @@ def _next_claimable(seen: set[str]) -> tuple[dict, Role, str | None] | None:
             rows = role_instances(role)
             for row in rows:
                 sid = str(row["id"])
+                if sid in busy:
+                    continue
                 if _held_by_instance(cards, role.id, sid) < role.wip:
                     return card, role, sid
             if len(rows) < max(1, role.maxInstances):
@@ -191,27 +201,47 @@ def dispatch_pending(run_turn) -> int:
     """Wake one role turn per claimable card until the board is quiet.
 
     `run_turn(session_id, user_msg)` runs one blocking host-side turn (server
-    provides it). Bounded per cycle; cards the roles did not claim stay in todo
-    and are retried on the next trigger — never in a tight loop.
+    provides it). 裁决 39: the cycle first COLLECTS its assignments — one
+    instance per card, planned instances count as full so the walk grows or
+    picks the next numbered instance — then runs the wave's turns concurrently
+    (bounded pool, _MAX_PARALLEL). The cycle lock stays held until every turn
+    joins, so nested dispatch attempts from the turns' own after-hooks fail
+    fast on the non-blocking acquire. Bounded per cycle; cards the roles did
+    not claim stay in todo and are retried on the next trigger — never in a
+    tight loop.
     """
     if not _CYCLE.acquire(blocking=False):
         return 0  # another cycle is already walking the board
-    ran = 0
     try:
         seen: set[str] = set()
+        busy: set[str] = set()  # instances planned in THIS cycle (裁决 39)
+        plan: list[tuple[str, str, str]] = []  # (session, "card -> role", brief)
         for _ in range(16):  # hard bound: a cycle must terminate even if roles no-op
-            found = _next_claimable(seen)
+            found = _next_claimable(seen, busy)
             if found is None:
                 break
             card, role, instance = found
             seen.add(card["id"])
+            sid = instance if instance is not None else ensure_instance(role)
+            busy.add(sid)
+            plan.append((sid, f"{card['id']} -> {role.id}", card_brief(card)))
+        if not plan:
+            return 0
+
+        def _run_one(sid: str, label: str, brief: str) -> bool:
             try:
-                sid = instance if instance is not None else ensure_instance(role)
-                run_turn(sid, card_brief(card))
-                ran += 1
-            except Exception as exc:  # one broken session must not stall the board
-                runlog.problem("dispatch %s -> %s failed: %s", card["id"], role.id, exc)
-        return ran
+                run_turn(sid, brief)
+                return True
+            except Exception as exc:  # one broken session must not stall the wave
+                runlog.problem("dispatch %s failed: %s", label, exc)
+                return False
+
+        with ThreadPoolExecutor(max_workers=min(len(plan), _MAX_PARALLEL)) as pool:
+            # Materialize the submits FIRST: a lazy generator would block on the
+            # first f.result() before submitting the rest — serial, not parallel.
+            futures = [pool.submit(_run_one, *a) for a in plan]
+            results = [f.result() for f in futures]
+        return sum(results)
     finally:
         _CYCLE.release()
 
@@ -298,4 +328,32 @@ def stuck_note(cards: list[dict], lang: str = "zh") -> str:
         + "\n".join(lines)
         + "\nYou are the Planner: use pot_board_reassign to change role / send back"
         " to todo (reason required), or reply <<SILENT>> if it resolves itself."
+    )
+
+
+def done_note(cards: list[dict], lang: str = "zh") -> str:
+    """裁决 38: the planner's wake after a completed card — the visible block
+    lands first (裁决 30), then this INTERNAL note (裁决 35: persisted with the
+    flag, never rendered) asks the planner to review the report and split the
+    follow-ups; default `<<SILENT>>` when nothing follows."""
+    zh = lang != "en"
+    lines = []
+    for card in cards:
+        holder = str(card.get("holder") or "")
+        who = holder.split(":", 1)[0] + ("#" + holder.split(":", 1)[1][:4] if ":" in holder else "")
+        lines.append(f'- {card.get("id")} "{card.get("title")}" (holder: {who or "?"})')
+    if zh:
+        return (
+            "[board] 卡片已完成、报告已写进本会话（内部消息，用户看不到）：\n"
+            + "\n".join(lines)
+            + "\n你是 Planner：复盘报告是否达成目标；有后续就用 pot_board_create 续拆/建卡、"
+            "pot_board_reassign 调整归属；没有就回复 <<SILENT>>。"
+        )
+    return (
+        "[board] Cards completed, the report is in this conversation (internal note,"
+        " the user never sees it):\n"
+        + "\n".join(lines)
+        + "\nYou are the Planner: review the report — split follow-ups with"
+        " pot_board_create / reassign with pot_board_reassign, or reply <<SILENT>>"
+        " if nothing follows."
     )

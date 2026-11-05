@@ -1044,8 +1044,12 @@ def _after_turn(session_id: str, aborted: bool) -> None:
         fresh_done = dispatch.cards_done() - before_done
         if fresh_done:
             cards = [dispatch.board().get(cid) for cid in sorted(fresh_done)]
+            lang = "en" if load_config().ui_lang == "en" else "zh"
             for target, routed in dispatch.notify_route(cards).items():
                 deliver_card_block(target, routed)
+                # 裁决 38: after the block, wake the source conversation's
+                # Planner internally (35) — review the report, split what's next.
+                host_turn(target, dispatch.done_note(routed, lang), internal=True)
         # 裁决 34: a card going blocked wakes its planner — internally (35).
         fresh_blocked = dispatch.cards_blocked() - before_blocked
         if fresh_blocked:

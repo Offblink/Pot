@@ -1,6 +1,6 @@
-"""裁决 30/31: a review card block is host-written into the dispatching
-conversation — no model turn, no `[card review]` note, and no chat anywhere
-else (human/seed cards stay board-only)."""
+"""裁决 30/31/38: a review card block is host-written into the dispatching
+conversation, followed by one internal planner wake (no `[card review]` note,
+no chat anywhere else — human/seed cards stay board-only)."""
 
 from __future__ import annotations
 
@@ -92,7 +92,10 @@ def test_deliver_to_a_deleted_session_is_silent(env):
     assert webui.session_alerts() == {}
 
 
-def test_after_turn_delivers_fresh_review_only_to_its_source(env, monkeypatch):
+def test_after_turn_delivers_fresh_review_and_wakes_its_source_internally(env, monkeypatch):
+    """裁决 30/31 + 38: the block is host-written into the dispatching
+    conversation AND the same source gets exactly one internal planner wake —
+    the human/seed card never shows up in either."""
     session.save_session("chat-1", "my chat", [{"role": "user", "content": "ship it"}])
     card = env.board.create(Actor("chat", "chat-1"), "real task")
     human = env.board.human_create("seed card")
@@ -100,9 +103,8 @@ def test_after_turn_delivers_fresh_review_only_to_its_source(env, monkeypatch):
     monkeypatch.setattr(webui.dispatch, "cards_done", lambda: next(snapshots))
     monkeypatch.setattr(webui.dispatch, "dispatch_pending", lambda run: 0)
     monkeypatch.setattr(webui.jobs, "flush", lambda sid: [])
-    monkeypatch.setattr(
-        webui, "host_turn", lambda *a, **k: pytest.fail("a card block must not wake the model")
-    )
+    wakes: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(webui, "host_turn", lambda sid, msg, **kw: wakes.append((sid, msg, kw)))
 
     webui._after_turn("executor-sid", aborted=False)
 
@@ -116,3 +118,11 @@ def test_after_turn_delivers_fresh_review_only_to_its_source(env, monkeypatch):
     assert card["id"] in block and "real task" in block
     assert human["id"] not in block  # 裁决 31: the human/seed card is board-only
     assert webui.session_alerts().get("chat-1") == "card"
+    # 裁决 38: after the block, ONE internal wake for the same source — the
+    # planner reviews the report and splits follow-ups, defaulting silent.
+    assert len(wakes) == 1
+    sid, msg, kw = wakes[0]
+    assert sid == "chat-1"
+    assert kw.get("internal") is True
+    assert card["id"] in msg and "Planner" in msg and "<<SILENT>>" in msg
+    assert human["id"] not in msg  # the seed card wakes nobody
