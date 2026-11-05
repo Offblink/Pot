@@ -1,5 +1,6 @@
 package pot.launcher
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -37,9 +39,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.time.DayOfWeek
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import org.json.JSONObject
 
 /** (status, Chinese, English) — the label is resolved at paint time, not once at load. */
@@ -54,6 +62,50 @@ private val COLUMNS =
     )
 
 private val PRIORITIES = listOf("urgent", "normal", "low")
+
+/**
+ * A column shows at most this many cards (newest first); the rest sit behind
+ * the footer's 归档 link (user 2026-11-05: columns grew until scrolling hurt).
+ * A cap on the VIEW only — cards are audit records and `deleted` is a soft delete,
+ * so nothing is ever removed here.
+ */
+private const val VISIBLE_PER_COLUMN = 12
+
+private fun updatedAt(card: JSONObject): Long = card.optLong("updatedAt", 0L)
+
+/** `MM-dd HH:mm` for archive rows, comments and the detail's "updated" line. */
+private val stampFmt: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
+
+private fun stamp(epochSeconds: Long): String =
+    Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault()).format(stampFmt)
+
+/** Archive groups: 今天 / 昨天 / 本周 (Monday-based) / 更早. */
+private fun dateBucket(epochSeconds: Long): Int {
+    val date = Instant.ofEpochSecond(epochSeconds).atZone(ZoneId.systemDefault()).toLocalDate()
+    val today = LocalDate.now()
+    return when {
+        date == today -> 0
+        date == today.minusDays(1) -> 1
+        !date.isBefore(today.with(DayOfWeek.MONDAY)) -> 2
+        else -> 3
+    }
+}
+
+private fun bucketLabel(bucket: Int): String =
+    when (bucket) {
+        0 -> Strings.t("今天", "Today")
+        1 -> Strings.t("昨天", "Yesterday")
+        2 -> Strings.t("本周", "This week")
+        else -> Strings.t("更早", "Earlier")
+    }
+
+private fun cardLabels(card: JSONObject): List<String> {
+    val arr = card.optJSONArray("labels") ?: return emptyList()
+    return (0 until arr.length()).map { arr.optString(it) }
+}
+
+private fun statusLabel(status: String): String =
+    COLUMNS.firstOrNull { it.first == status }?.let { Strings.t(it.second, it.third) } ?: status
 
 /** 看板页（spec §4.2）: six columns + the role table; every human action lives here. */
 @Composable
@@ -124,12 +176,20 @@ private fun TabPill(
 @Composable
 private fun BoardColumns(state: PotState) {
     val p = pal
+    var archiveStatus by remember { mutableStateOf<String?>(null) }
     Row(
         Modifier.fillMaxSize().padding(horizontal = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         COLUMNS.forEach { (status, zh, en) ->
-            val cards = state.cards.filter { it.optString("status") == status && !it.optBoolean("deleted") }
+            // Newest first (user 2026-11-05: 「卡片是从上向下累积的」— the card being
+            // worked on now must be the one in view), then capped at the freshest 12.
+            val cards =
+                state.cards
+                    .filter { it.optString("status") == status && !it.optBoolean("deleted") }
+                    .sortedByDescending { updatedAt(it) }
+            val shown = cards.take(VISIBLE_PER_COLUMN)
+            val older = cards.size - shown.size
             Column(
                 // Equal shares, no horizontal scroll: this box runs at 150% DPI,
                 // so the 1180px window is only ~787dp wide — six fixed 176dp
@@ -152,23 +212,58 @@ private fun BoardColumns(state: PotState) {
                         fontFamily = FontFamily.Monospace,
                     )
                     Spacer(Modifier.weight(1f))
+                    // The column's REAL size, cap or no cap — the footer carries the rest.
                     Muted("${cards.size}")
                 }
                 Spacer(Modifier.height(8.dp))
                 Column(
-                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                    Modifier.weight(1f).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    cards.forEach { card -> BoardCard(state, card) }
-                    if (cards.isEmpty()) {
+                    shown.forEach { card ->
+                        // Keyed by id: without it, a refresh that re-sorts the column
+                        // would hand an open card's dialog to whatever lands in its slot.
+                        key(card.optString("id")) { BoardCard(state, card) }
+                    }
+                    if (shown.isEmpty()) {
                         Text("—", color = p.muted.copy(alpha = 0.5f), fontSize = 12.sp)
+                    }
+                }
+                if (older > 0) {
+                    // Pinned under the list, not scrolled with it: the exit to the
+                    // overflow has to stay visible without scrolling to it.
+                    TextButton(
+                        onClick = {
+                            Log.info("ui: archive footer status=$status older=$older")
+                            archiveStatus = status
+                        },
+                        contentPadding = CardPadding,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            Strings.t("更早的 $older 张 · 查看归档", "$older older · view archive"),
+                            color = p.muted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }
         }
     }
+    archiveStatus?.let { status ->
+        val (zh, en) = COLUMNS.first { it.first == status }.let { it.second to it.third }
+        ArchiveDialog(state, status, zh, en) { archiveStatus = null }
+    }
 }
 
+/**
+ * The column card — deliberately one line (user 2026-11-05: too much scrolling):
+ * title, priority dot, role/holder/lease in small print. Labels, desc, checklist,
+ * report, comments and the action buttons all live in [CardDetailDialog]; a card
+ * with a button row per card is exactly the height that made columns scroll.
+ */
 @Composable
 private fun BoardCard(
     state: PotState,
@@ -178,27 +273,28 @@ private fun BoardCard(
     val status = card.optString("status")
     val role = card.optString("role").ifEmpty { null }
     val holder = card.optString("holder").ifEmpty { null }
-    val report = card.optJSONObject("report")
     val leaseUntil = if (card.isNull("leaseUntil")) 0L else card.optLong("leaseUntil", 0L)
     val leaseLeft = (leaseUntil - System.currentTimeMillis() / 1000).coerceAtLeast(0L)
-    var assignOpen by remember { mutableStateOf(false) }
-    var showReject by remember { mutableStateOf(false) }
-    var showDelete by remember { mutableStateOf(false) }
+    var showDetail by remember { mutableStateOf(false) }
 
     Surface(
+        onClick = {
+            Log.info("ui: card open detail id=${card.optString("id")}")
+            showDetail = true
+        },
         shape = RoundedCornerShape(10.dp),
         color = p.surfaceVariant,
         shadowElevation = 1.dp,
     ) {
-        Column(Modifier.padding(9.dp)) {
-            Row(verticalAlignment = Alignment.Top) {
+        Column(Modifier.padding(horizontal = 9.dp, vertical = 7.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     card.optString("title"),
                     modifier = Modifier.weight(1f),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = p.fg,
-                    maxLines = 3,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.width(4.dp))
@@ -209,44 +305,138 @@ private fun BoardCard(
                         "low" -> p.secondary
                         else -> p.muted
                     }
-                Box(Modifier.padding(top = 4.dp).width(7.dp).height(7.dp).background(dot, RoundedCornerShape(99.dp)))
+                Box(Modifier.width(7.dp).height(7.dp).background(dot, RoundedCornerShape(99.dp)))
             }
-            Spacer(Modifier.height(5.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                val labels = card.optJSONArray("labels")
-                if (labels != null) {
-                    for (i in 0 until minOf(labels.length(), 3)) {
-                        Chip(labels.optString(i), p.secondary)
-                    }
-                    if (labels.length() > 3) Chip("+${labels.length() - 3}", p.muted)
-                }
-                if (role != null) Chip(role, p.tertiary)
-            }
-            if (holder != null) {
+            if (role != null || holder != null || (status == "doing" && leaseLeft > 0)) {
                 Spacer(Modifier.height(4.dp))
-                Muted(Strings.t("持有：", "Held by: ") + holder.substringBefore(":"))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (role != null) Chip(role, p.tertiary)
+                    if (holder != null) Muted(holder.substringBefore(":"))
+                    if (status == "doing" && leaseLeft > 0) {
+                        Muted(Strings.t("租约 ", "lease ") + "%d:%02d".format(leaseLeft / 60, leaseLeft % 60))
+                    }
+                }
             }
-            if (status == "doing" && leaseLeft > 0) {
-                Spacer(Modifier.height(2.dp))
-                Muted(Strings.t("租约 ", "lease ") + "%d:%02d".format(leaseLeft / 60, leaseLeft % 60))
+        }
+    }
+
+    if (showDetail) {
+        CardDetailDialog(state, card) { showDetail = false }
+    }
+}
+
+/**
+ * 卡片详情 (spec §4.2): the body the compact card hides — labels, desc, checklist
+ * with evidence, report, comments — plus every human action. Reject/confirm dialogs
+ * stack exactly as they used to on the card.
+ */
+@Composable
+private fun CardDetailDialog(
+    state: PotState,
+    card: JSONObject,
+    onClose: () -> Unit,
+) {
+    val p = pal
+    val status = card.optString("status")
+    val role = card.optString("role").ifEmpty { null }
+    val holder = card.optString("holder").ifEmpty { null }
+    val report = card.optJSONObject("report")
+    val leaseUntil = if (card.isNull("leaseUntil")) 0L else card.optLong("leaseUntil", 0L)
+    val leaseLeft = (leaseUntil - System.currentTimeMillis() / 1000).coerceAtLeast(0L)
+    val priority = card.optString("priority", "normal")
+    var assignOpen by remember { mutableStateOf(false) }
+    var showReject by remember { mutableStateOf(false) }
+    var showDelete by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text(card.optString("title"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Chip(statusLabel(status), statusColor(status))
+                    Chip(
+                        priorityLabel(priority),
+                        when (priority) {
+                            "urgent" -> p.error
+                            "low" -> p.secondary
+                            else -> p.muted
+                        },
+                    )
+                    cardLabels(card).forEach { Chip(it, p.secondary) }
+                    if (role != null) Chip(role, p.tertiary)
+                }
+                Muted(Strings.t("更新于 ", "updated ") + stamp(updatedAt(card)))
+                if (holder != null) {
+                    Muted(Strings.t("持有：", "Held by: ") + holder.substringBefore(":"))
+                }
+                if (status == "doing" && leaseLeft > 0) {
+                    Muted(Strings.t("租约 ", "lease ") + "%d:%02d".format(leaseLeft / 60, leaseLeft % 60))
+                }
+                val desc = card.optString("desc")
+                if (desc.isNotBlank()) {
+                    SectionTitle(Strings.t("描述", "DESCRIPTION"))
+                    Text(desc, fontSize = 12.sp, color = p.fg)
+                }
+                val checklist = card.optJSONArray("checklist")
+                if (checklist != null && checklist.length() > 0) {
+                    SectionTitle(Strings.t("清单", "CHECKLIST"))
+                    for (i in 0 until checklist.length()) {
+                        val item = checklist.optJSONObject(i) ?: continue
+                        val done = item.optBoolean("done")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                if (done) "✓" else "○",
+                                fontSize = 12.sp,
+                                color = if (done) p.muted else p.fg,
+                            )
+                            Column {
+                                Text(
+                                    item.optString("text"),
+                                    fontSize = 12.sp,
+                                    color = if (done) p.muted else p.fg,
+                                    textDecoration = if (done) TextDecoration.LineThrough else null,
+                                )
+                                val evidence = item.optString("evidence")
+                                if (done && evidence.isNotEmpty()) {
+                                    Muted(Strings.t("证据：", "evidence: ") + evidence)
+                                }
+                            }
+                        }
+                    }
+                }
+                if (report != null) {
+                    SectionTitle(Strings.t("报告", "REPORT"))
+                    Text(report.optString("summary"), fontSize = 12.sp, color = p.muted)
+                }
+                val comments = card.optJSONArray("comments")
+                if (comments != null && comments.length() > 0) {
+                    SectionTitle(Strings.t("评论", "COMMENTS"))
+                    for (i in 0 until comments.length()) {
+                        val c = comments.optJSONObject(i) ?: continue
+                        val at = c.optLong("at", 0L)
+                        Column {
+                            Muted(c.optString("by") + (if (at > 0) " · " + stamp(at) else ""))
+                            Text(c.optString("text"), fontSize = 12.sp, color = p.fg)
+                        }
+                    }
+                }
             }
-            if (status == "review" && report != null) {
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    report.optString("summary").take(120),
-                    fontSize = 11.sp,
-                    color = p.muted,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.height(7.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        },
+        confirmButton = {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 if (status != "done") {
                     Box {
-                        TextButton(onClick = { assignOpen = true }, contentPadding = CardPadding) {
-                            Text(Strings.t("改派", "Reassign"), fontSize = 11.sp, color = p.muted)
-                        }
+                        MiniActionButton(Strings.t("改派", "Reassign"), p.muted) { assignOpen = true }
                         DropdownMenu(expanded = assignOpen, onDismissRequest = { assignOpen = false }) {
                             DropdownMenuItem(
                                 text = { Text(Strings.t("不限（任何角色）", "Anyone (any role)")) },
@@ -270,29 +460,28 @@ private fun BoardCard(
                 when (status) {
                     "review" -> {
                         Button(
-                            onClick = { state.complete(card) },
+                            onClick = {
+                                onClose()
+                                state.complete(card)
+                            },
                             contentPadding = CardPadding,
                             colors = ButtonDefaults.buttonColors(containerColor = p.primary, contentColor = p.onPrimary),
                         ) { Text(Strings.t("✓ 完成", "✓ Done"), fontSize = 11.sp, fontWeight = FontWeight.Bold) }
                         RejectButton { showReject = true }
                     }
                     "doing" -> {
-                        TextButton(onClick = { state.renew(card) }, contentPadding = CardPadding) {
-                            Text(Strings.t("续租", "Renew"), fontSize = 11.sp, color = p.muted)
-                        }
+                        MiniActionButton(Strings.t("续租", "Renew"), p.muted) { state.renew(card) }
                         RejectButton { showReject = true }
                     }
                     "blocked" -> RejectButton { showReject = true }
                 }
                 if (status != "done") {
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { showDelete = true }, contentPadding = CardPadding) {
-                        Text(Strings.t("删除", "Delete"), fontSize = 11.sp, color = p.muted)
-                    }
+                    MiniActionButton(Strings.t("删除", "Delete"), p.muted) { showDelete = true }
                 }
+                MiniActionButton(Strings.t("关闭", "Close"), p.muted, onClose)
             }
-        }
-    }
+        },
+    )
 
     if (showReject) {
         RejectDialog(state, card) { showReject = false }
@@ -322,17 +511,169 @@ private fun BoardCard(
     }
 }
 
+/**
+ * 归档 (user 2026-11-05): everything past the column's newest [VISIBLE_PER_COLUMN],
+ * read-only, grouped 今天/昨天/本周/更早 and filterable by label/role. The VIEW
+ * holds the overflow — the data layer is untouched, `deleted` stays the only
+ * (soft) removal path.
+ */
+@Composable
+private fun ArchiveDialog(
+    state: PotState,
+    status: String,
+    zh: String,
+    en: String,
+    onClose: () -> Unit,
+) {
+    val p = pal
+    val overflow =
+        remember(state.cards, status) {
+            state.cards
+                .filter { it.optString("status") == status && !it.optBoolean("deleted") }
+                .sortedByDescending { updatedAt(it) }
+                .drop(VISIBLE_PER_COLUMN)
+        }
+    var labelFilter by remember { mutableStateOf<String?>(null) }
+    var roleFilter by remember { mutableStateOf<String?>(null) }
+    var labelOpen by remember { mutableStateOf(false) }
+    var roleOpen by remember { mutableStateOf(false) }
+
+    val labels = remember(overflow) { overflow.flatMap { cardLabels(it) }.distinct().sorted() }
+    val roles =
+        remember(overflow) {
+            overflow.map { it.optString("role") }.filter { it.isNotEmpty() }.distinct().sorted()
+        }
+    val cards =
+        overflow.filter {
+            (labelFilter == null || cardLabels(it).contains(labelFilter)) &&
+                (roleFilter == null || it.optString("role") == roleFilter)
+        }
+    val groups = cards.groupBy { dateBucket(updatedAt(it)) }
+
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text(Strings.t("「$zh」归档", "“$en” archive")) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box {
+                        OutlinedButton(onClick = { labelOpen = true }) {
+                            Text(
+                                Strings.t("标签：", "Label: ") + (labelFilter ?: Strings.t("全部", "all")),
+                                fontSize = 12.sp,
+                            )
+                        }
+                        DropdownMenu(expanded = labelOpen, onDismissRequest = { labelOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(Strings.t("全部", "all")) },
+                                onClick = {
+                                    labelFilter = null
+                                    labelOpen = false
+                                },
+                            )
+                            labels.forEach { l ->
+                                DropdownMenuItem(
+                                    text = { Text(l) },
+                                    onClick = {
+                                        labelFilter = l
+                                        labelOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    Box {
+                        OutlinedButton(onClick = { roleOpen = true }) {
+                            Text(
+                                Strings.t("角色：", "Role: ") + (roleFilter ?: Strings.t("不限", "any")),
+                                fontSize = 12.sp,
+                            )
+                        }
+                        DropdownMenu(expanded = roleOpen, onDismissRequest = { roleOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(Strings.t("不限", "any")) },
+                                onClick = {
+                                    roleFilter = null
+                                    roleOpen = false
+                                },
+                            )
+                            roles.forEach { r ->
+                                DropdownMenuItem(
+                                    text = { Text(r) },
+                                    onClick = {
+                                        roleFilter = r
+                                        roleOpen = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                if (cards.isEmpty()) {
+                    Muted(Strings.t("（没有更早的卡）", "(no older cards)"))
+                }
+                for (bucket in 0..3) {
+                    val group = groups[bucket] ?: continue
+                    SectionTitle("${bucketLabel(bucket)} · ${group.size}")
+                    group.forEach { card ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            val role = card.optString("role").ifEmpty { null }
+                            if (role != null) Chip(role, p.tertiary)
+                            Text(
+                                card.optString("title"),
+                                Modifier.weight(1f),
+                                color = p.fg,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Muted(stamp(updatedAt(card)))
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onClose) { Text(Strings.t("关闭", "Close")) }
+        },
+    )
+}
+
 private val CardPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 2.dp)
 
 /** The role table's action column: fixed, so Edit/Del never get squeezed. */
 private val ActionsWidth = 112.dp
 
+/**
+ * A small bordered action button. Bare `TextButton` text read as plain text
+ * (user 2026-11-05, pointing at 编辑/删: 「差点看不出是按钮」) — the hairline pill
+ * border in the label's own color is what says "button" without growing the row.
+ */
+@Composable
+private fun MiniActionButton(
+    label: String,
+    color: Color,
+    onClick: () -> Unit,
+) {
+    TextButton(
+        onClick = onClick,
+        contentPadding = CardPadding,
+        border = BorderStroke(1.dp, color.copy(alpha = 0.55f)),
+        colors = ButtonDefaults.textButtonColors(contentColor = color),
+    ) {
+        Text(label, fontSize = 11.sp)
+    }
+}
+
 @Composable
 private fun RejectButton(onClick: () -> Unit) {
-    val p = pal
-    TextButton(onClick = onClick, contentPadding = CardPadding) {
-        Text(Strings.t("✗ 退回", "✗ Reject"), fontSize = 11.sp, color = p.error)
-    }
+    MiniActionButton(Strings.t("✗ 退回", "✗ Reject"), pal.error, onClick)
 }
 
 @Composable
@@ -612,12 +953,8 @@ private fun RolesPanel(state: PotState) {
                         overflow = TextOverflow.Ellipsis,
                     )
                     Row(Modifier.width(ActionsWidth), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { editing = role }, contentPadding = CardPadding) {
-                            Text(Strings.t("编辑", "Edit"), fontSize = 11.sp)
-                        }
-                        TextButton(onClick = { deleting = role }, contentPadding = CardPadding) {
-                            Text(Strings.t("删", "Del"), fontSize = 11.sp, color = p.error)
-                        }
+                        MiniActionButton(Strings.t("编辑", "Edit"), p.primary) { editing = role }
+                        MiniActionButton(Strings.t("删", "Del"), p.error) { deleting = role }
                     }
                 }
             }
