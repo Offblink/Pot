@@ -52,6 +52,25 @@ def test_full_lifecycle_through_tools(repo, board):
     assert denied2.startswith("ERROR: use_report")  # done only via report
 
 
+def test_retire_tool_is_planner_only_and_own_source(repo, board):
+    """裁决 40 through the tool layer: the engine gate IS the permission —
+    a bound role actor gets ERROR; the planner in the source session gets ok."""
+    repo.create({"id": "chat", "canCreateCard": True}, creator="human")
+    chat1 = make_tools(board, Actor("chat", "chat-1"))
+    card = json.loads(chat1["pot_board_create"](title="dead end"))["card"]
+    worker = make_tools(board, Actor("exec", "s1"))
+    denied = worker["pot_board_retire"](
+        card_id=card["id"], reason="x", if_version=card["ifVersion"]
+    )
+    assert denied.startswith("ERROR: planner_only")
+
+    planner = make_tools(board, Actor("planner", "chat-1"))
+    ok = json.loads(
+        planner["pot_board_retire"](card_id=card["id"], reason="作废", if_version=card["ifVersion"])
+    )
+    assert ok["ok"] and ok["card"]["deleted"] is True
+
+
 def test_release_returns_to_todo_with_reason(repo, board):
     t = _tools(repo, board)
     created = json.loads(t["pot_board_create"](title="x"))

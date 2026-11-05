@@ -338,6 +338,7 @@ M5+，届时单独裁决（自备 Python 还是要塞进安装包）。
 | 37 | 启动器去掉看板页（2026-11-05 追加，用户点名） | 启动器只剩 **角色**（+设置/关于/托盘/顶栏）；看板列、归档、详情弹层等死代码删除；人建卡入口移到 WebUI 中心板 |
 | 38 | 卡完成后唤醒 Planner（2026-11-06 追加，用户「那你加吧」） | 卡进 **done** → `deliver_card_block` 之后，对同一 `notify_route` 目标再发一条**内部 note**（裁决 35 口径：渲染层不显示，模型默认 `<<SILENT>>`）：复盘报告、有后续就 `pot_board_create` 续拆/`pot_board_reassign` 调整。与裁决 34 的 blocked 唤醒同范式；人卡/种子卡照旧零打扰（裁决 31 闸不变） |
 | 39 | 并行派工（2026-11-06 追加，用户「多 agent → 多像素」） | `dispatch_pending` 改**先收集、再并发**：一个周期先为每张可认领卡分配**不同实例**（本周期已分配的实例计满 → 触发裁决 33 增殖），再用有界线程池（`_MAX_PARALLEL=4`，限的是同时在飞的模型 API 调用）并行跑 `run_turn`；`_CYCLE` 持到全部回合汇合——嵌套唤醒拿不到锁、非阻塞直接返回。并发前提实测成立：`jobs` 的当前会话是 thread-local（不是全局态）、看板每操作独立连接 + BEGIN IMMEDIATE + WAL、告警与会话锁各自有锁 |
+| 40 | 卡片退役通道（2026-11-06 追加，E；用户选「planner 可 retire 自己 source 的卡」） | 新工具 **`pot_board_retire`**（`Board.retire`）：**planner_only 闸 + reason 必填 + ifVersion**，把**自己 source 的活卡**（todo/doing/blocked）软删（`deleted=1`、`retired: <reason>` 进评论）——死卡不再永远堵 todo。**done 不可退役**（历史归场景，人经详情重开/删除）；无 source 的人卡只归人（WebUI 详情删除不变）；别会话的卡报 `not_your_card`；重退 `no_such_card`。Planner 提示词加一条自有卡退役说明 |
 
 ## 10. 风险
 

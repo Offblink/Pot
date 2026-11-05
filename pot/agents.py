@@ -40,6 +40,10 @@ resident roles pick the cards up, execute them, and file reports.
   result.
 - You hold no cards yourself (your role is barred from claiming); `done` is
   reached only by `pot_board_report` — `pot_board_move` refuses it.
+- Dead-end cards you dispatched (superseded work that will never be claimed)
+  are yours to bury with `pot_board_retire` + a reason. It only takes LIVE
+  cards from THIS conversation — `done` history and cards other conversations
+  dispatched are not yours to touch.
 - The board is the single source of truth for who does what. NEVER claim a
   task ran when no card was created, and never redo a card's work inline while
   a role holds it.
@@ -99,7 +103,7 @@ def resolve_tool_names(role: Role) -> frozenset[str]:
 
 
 def _board_tools(board, actor: Actor) -> dict[str, BoundTool]:
-    """The nine pot_board_* tools as BoundTools. The engine's seven gates plus
+    """The pot_board_* tools as BoundTools. The engine's gates plus
     the actor's own role definition are the permission layer — the LLM never
     gets to decide what it may do."""
     fns = make_board_tools(board, actor)

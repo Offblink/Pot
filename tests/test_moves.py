@@ -83,6 +83,40 @@ def test_reassign_refuses_done(repo, board):
         board.reassign(Actor("planner", "p1"), c["id"], None, "x", done["ifVersion"])
 
 
+def test_retire_is_planner_only_scoped_and_soft(repo, board):
+    """裁决 40: planner 退役自己 source 的活卡——软删 + reason 进评论；
+    别会话的卡 not_your_card、无 reason 拒绝、重退 no_such_card。"""
+    repo.create({"id": "chat", "canCreateCard": True}, creator="human")
+    c = board.create(Actor("chat", "chat-1"), "dead end")
+    foreign = board.create(Actor("chat", "chat-2"), "not mine")
+
+    with pytest.raises(PotError, match="planner_only"):
+        board.retire(Actor("chat", "chat-1"), c["id"], "废了", c["ifVersion"])
+    with pytest.raises(PotError, match="need_reason"):
+        board.retire(Actor("planner", "chat-1"), c["id"], "  ", c["ifVersion"])
+    with pytest.raises(PotError, match="not_your_card"):
+        board.retire(Actor("planner", "chat-1"), foreign["id"], "越权", foreign["ifVersion"])
+
+    gone = board.retire(Actor("planner", "chat-1"), c["id"], "阶段作废", c["ifVersion"])
+    assert gone["deleted"] is True
+    assert "retired: 阶段作废" in str(gone["comments"])
+    assert all(x["id"] != c["id"] for x in board.list())
+    assert any(x["id"] == c["id"] for x in board.list(include_deleted=True))
+    with pytest.raises(PotError, match="no_such_card"):
+        board.retire(Actor("planner", "chat-1"), c["id"], "again", gone["ifVersion"])
+
+
+def test_retire_refuses_done(repo, board):
+    """done 是历史：planner 不许埋，人经场景重开/删除才是它的通道。"""
+    repo.create({"id": "r1"}, creator="human")
+    repo.create({"id": "planner", "canCreateCard": True, "canClaim": False}, creator="human")
+    c = board.human_create(title="a")
+    claimed = board.claim(Actor("r1", "s1"), c["id"], c["ifVersion"])
+    done = board.report(Actor("r1", "s1"), c["id"], "shipped", claimed["ifVersion"])
+    with pytest.raises(PotError, match="bad_transition"):
+        board.retire(Actor("planner", "p1"), c["id"], "x", done["ifVersion"])
+
+
 def test_release_needs_reason(repo, board):
     repo.create({"id": "r1"}, creator="human")
     c = board.human_create(title="a")

@@ -579,3 +579,33 @@ class Board:
             row = self._fetch(conn, card_id)
             self._check_version(row, if_version)
             return self._apply(conn, card_id, {"deleted": 1}, now)
+
+    def retire(self, actor: Actor, card_id: str, reason: str, if_version: object) -> dict:
+        """裁决 40: the planner buries a dead-end card ITS conversation
+        dispatched (source = this session) — soft delete, reason in comments.
+
+        Live cards only: `done` is history (the human reopens or deletes it
+        through the scene). Cards with no source are human-created and stay
+        human-only; another conversation's card raises not_your_card.
+        """
+        if actor.role_id != "planner":
+            raise PotError("planner_only", actor.role_id)
+        if not isinstance(reason, str) or not reason.strip():
+            raise PotError("need_reason", card_id)
+        now = int(time.time())
+        with self._db() as conn, _tx(conn):
+            self._sweep(conn, now)
+            row = self._fetch(conn, card_id)
+            self._check_version(row, if_version)
+            if row["status"] == "done":
+                raise PotError("bad_transition", "done → retired")
+            if str(row["source"] or "") != actor.session_id:
+                raise PotError("not_your_card", card_id)
+            comments = json.loads(row["comments"])
+            comments.append({"by": actor.holder, "text": f"retired: {reason}", "at": now})
+            return self._apply(
+                conn,
+                card_id,
+                {"deleted": 1, "comments": json.dumps(comments, ensure_ascii=False)},
+                now,
+            )

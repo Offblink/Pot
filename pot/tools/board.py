@@ -129,6 +129,16 @@ SCHEMAS: dict[str, dict] = {
         },
         ["card_id", "reason", "if_version"],
     ),
+    "pot_board_retire": schema(
+        "pot_board_retire",
+        "Planner only (裁决 40): retire (soft-delete) a dead-end LIVE card that"
+        " THIS conversation dispatched — superseded work that will never be"
+        " claimed. The reason lands in the card's comments. `done` history,"
+        " human-created cards, and cards other conversations dispatched are"
+        " rejected.",
+        {"card_id": _ID, "reason": {"type": "string"}, "if_version": _VERSION},
+        ["card_id", "reason", "if_version"],
+    ),
 }
 
 
@@ -148,7 +158,7 @@ def _ok(payload: dict) -> str:
 
 
 def make_tools(board: Board, actor: Actor) -> dict[str, Callable[..., str]]:
-    """The ten pot_board_* tools bound to one actor (role + session)."""
+    """The pot_board_* tools bound to one actor (role + session)."""
 
     @_guard
     def pot_board_list(
@@ -233,6 +243,10 @@ def make_tools(board: Board, actor: Actor) -> dict[str, Callable[..., str]]:
     ) -> str:
         return _ok({"card": board.reassign(actor, card_id, to_role, reason, if_version)})
 
+    @_guard
+    def pot_board_retire(card_id: str, reason: str, if_version: int) -> str:
+        return _ok({"card": board.retire(actor, card_id, reason, if_version)})
+
     bound = (
         pot_board_list,
         pot_board_get,
@@ -244,5 +258,6 @@ def make_tools(board: Board, actor: Actor) -> dict[str, Callable[..., str]]:
         pot_board_report,
         pot_board_release,
         pot_board_reassign,
+        pot_board_retire,
     )
     return {fn.__name__: fn for fn in bound}
