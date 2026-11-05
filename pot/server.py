@@ -192,7 +192,9 @@ class WebUIRuntime:
         self.last_seen = time.monotonic()
 
     def sessions_list(self) -> list[dict]:
-        return session.list_sessions()
+        # 裁决 29: role sessions are the agents' memory, not the user's
+        # conversations — the sidebar shows only the latter.
+        return [s for s in session.list_sessions() if not s.get("role")]
 
     def sessions_load(self, session_id: str) -> dict | None:
         return session.load_session(session_id)
@@ -325,8 +327,9 @@ def _session_lock(session_id: str) -> threading.Lock:
 
 # ── session alerts (§61): what wants the user's eyes ──
 #
-# Three things in a session want the user: the agent asked a question (an
-# in-turn `ask`), a turn finished, a turn failed. An alert is raised only when
+# Four things in a session want the user: the agent asked a question (an
+# in-turn `ask`), a turn finished, a turn failed, and a review card block
+# landed (裁决 30). An alert is raised only when
 # nobody is *showing* that session: the page that has it open — visible and
 # focused, because a minimized webUI is not "opened" (user rule, 2026-09-21)
 # — says so every few seconds, and the server reads a fresh claim as "the user
@@ -335,9 +338,9 @@ def _session_lock(session_id: str) -> threading.Lock:
 # is what stops it — the shape of the unread-mail ring (§25.2), with the page's
 # own claim in place of the grace.
 
-ALERT_KINDS = ("ask", "done", "error")
+ALERT_KINDS = ("ask", "done", "error", "card")
 SEEN_TTL_S = 8.0  # a claim reads as "watching" this long (page heartbeat: 3 s)
-_ALERTS: dict[str, str] = {}  # session id -> kind ("ask" | "done" | "error")
+_ALERTS: dict[str, str] = {}  # session id -> kind ("ask" | "done" | "error" | "card")
 _SEEN: dict[str, float] = {}  # session id -> monotonic of the last claim
 _ALERT_LOCK = threading.Lock()
 
@@ -953,11 +956,38 @@ def host_turn(session_id: str, user_msg: str | None) -> None:
     _execute_turn(session_id, user_msg, sink=WebSink(None, session_id), runtime=runtime)
 
 
+def deliver_card_block(session_id: str, cards: list[dict]) -> None:
+    """裁决 30: write the review card block straight into the dispatching
+    conversation — no model turn, no internal note.
+
+    The session lock serializes against chat turns: a turn holds it from load
+    to save, so an append made under it can never be clobbered by a save that
+    loaded earlier, and a queued write simply lands after the turn's reply.
+    """
+    lang = "en" if load_config().ui_lang == "en" else "zh"
+    block = dispatch.review_block(cards, lang)
+    with _session_lock(session_id):
+        data = session.load_session(session_id)
+        if data is None:  # deleted since dispatch: nothing to tell
+            return
+        messages = list(data.get("messages") or [])
+        messages.append({"role": "assistant", "content": block, "ts": time.time()})
+        session.save_session(
+            session_id,
+            str(data.get("title") or ""),
+            messages,
+            data.get("subagents"),
+            data.get("asks"),
+        )
+    runlog.note("review: card block -> %s (%d card(s))", session_id, len(cards))
+    note_alert(session_id, "card")
+
+
 def _after_turn(session_id: str, aborted: bool) -> None:
     """Post-turn hooks: deliver jobs that finished while this turn ran (spec
-    §3.4 裁决 20 — 挂起补投), wake roles for claimable cards (M2b), and notify
-    the Planner when a dispatched card reaches review (spec §3.3). A stopped
-    turn does none of it — stop means stop."""
+    §3.4 裁决 20 — 挂起补投), wake roles for claimable cards (M2b), and write
+    review card blocks into the conversations that dispatched them (裁决 30/31).
+    A stopped turn does none of it — stop means stop."""
     try:
         # Snapshot first: a card that reaches review inside the flush or the
         # dispatch cycle below counts as fresh for THIS hook.
@@ -970,10 +1000,9 @@ def _after_turn(session_id: str, aborted: bool) -> None:
         dispatch.dispatch_pending(host_turn)
         fresh = dispatch.cards_in_review() - before
         if fresh:
-            target = dispatch.latest_user_session()
-            if target:
-                cards = [dispatch.board().get(cid) for cid in sorted(fresh)]
-                host_turn(target, dispatch.review_note(cards))
+            cards = [dispatch.board().get(cid) for cid in sorted(fresh)]
+            for target, routed in dispatch.review_route(cards).items():
+                deliver_card_block(target, routed)
     except Exception as exc:
         runlog.problem("after-turn %s: %s", session_id, exc)
 

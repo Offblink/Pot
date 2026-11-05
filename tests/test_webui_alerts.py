@@ -172,3 +172,34 @@ def test_the_alert_feed_never_repaints_the_transcript(page):
         page.wait_for_timeout(100)
     assert page.evaluate("() => window.__alertsMutations") == 0
     assert _sessions(page), "the sidebar is still there"  # …and the page is alive
+
+
+def _review_card() -> dict:
+    return {
+        "id": "p-e2e",
+        "title": "e2e task",
+        "priority": "urgent",
+        "role": "executor",
+        "report": {"summary": "shipped it"},
+    }
+
+
+def test_a_host_written_card_block_lands_live_in_the_open_session(page, room):
+    """裁决 30: no turn carries the block in — the idle poll notices the
+    transcript grew and repaints, so the value shows up where the user sits."""
+    sid = _new_session(page)
+    _open_session(page, sid)
+    webui_server.deliver_card_block(sid, [_review_card()])
+    assert _wait(lambda: page.evaluate("() => document.body.innerText.includes('p-e2e')")), (
+        "the card block never appeared in the open conversation"
+    )
+
+
+def test_a_card_block_rings_the_dot_on_a_background_session(page, room):
+    shown = _new_session(page)
+    other = _new_session(page)
+    _open_session(page, shown)
+    webui_server.deliver_card_block(other, [_review_card()])
+    page.evaluate("async () => { await loadSessions(); await Alerts.tick(); }")
+    assert _wait(lambda: _dot(page, other) is not None), "no dot for a card awaiting review"
+    assert _dot(page, other) == {"title": "新卡片待验收"}, _dot(page, other)

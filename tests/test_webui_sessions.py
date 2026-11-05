@@ -15,6 +15,7 @@ import time
 import pytest
 from conftest import WebUIHost
 
+from pot import session as session_mod
 from pot.config import Config
 from pot.llm import LLMResult
 from pot.server import WEBUI_TOKEN
@@ -152,3 +153,18 @@ def test_a_403_is_not_mistaken_for_an_unconfigured_shell(page):
     )
     assert shown is True, "no status line told the reader the page is unauthorized"
     page.unroute("**/config-status")
+
+
+def test_role_sessions_never_reach_the_sidebar(page):
+    """裁决 29: the sidebar is the user's conversations; an agent's memory
+    session (a `role` key) gets no row — its file stays on disk regardless."""
+    session_mod.save_session("role-e2e", "执行者", [{"role": "user", "content": "hi"}], role="exec")
+    page.evaluate("async () => { await loadSessions(); }")
+
+    ids = page.evaluate("() => allSessions.map(s => s.id)")
+    assert "role-e2e" not in ids, ids
+    served = page.evaluate(
+        "async () => (await (await fetch('/sessions')).json()).sessions.map(s => s.id)"
+    )
+    assert "role-e2e" not in served, served
+    assert session_mod.load_session("role-e2e")["role"] == "exec"  # the file survives

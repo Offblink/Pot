@@ -207,6 +207,7 @@
       'alert.ask': 'Agent 在等你回答',
       'alert.done': '回答完毕',
       'alert.error': '出错了',
+      'alert.card': '新卡片待验收',
       'alert.new': '有新消息',
       'xfer.sendToFriend': '发送文件给 {name}',
 
@@ -416,6 +417,7 @@
       'alert.ask': 'The agent is waiting for your answer',
       'alert.done': 'Answer ready',
       'alert.error': 'Something went wrong',
+      'alert.card': 'New card to review',
       'alert.new': 'New message',
       'xfer.sendToFriend': 'Sending a file to {name}',
 

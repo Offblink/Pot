@@ -56,6 +56,7 @@ def _row_to_card(row: sqlite3.Row) -> dict:
         "report": json.loads(row["report"]) if row["report"] else None,
         "comments": json.loads(row["comments"]),
         "createdBy": row["created_by"],
+        "source": row["source"],
         "createdAt": row["created_at"],
         "updatedAt": row["updated_at"],
         "deleted": bool(row["deleted"]),
@@ -106,12 +107,18 @@ class Board:
                     report TEXT,
                     comments TEXT NOT NULL DEFAULT '[]',
                     created_by TEXT NOT NULL,
+                    source TEXT,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL,
                     deleted INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            # 裁决 31: source = the conversation that created the card. Databases
+            # created before the column keep it via ALTER (CREATE IF NOT EXISTS
+            # never re-runs an existing table's definition).
+            if not any(col["name"] == "source" for col in conn.execute("PRAGMA table_info(cards)")):
+                conn.execute("ALTER TABLE cards ADD COLUMN source TEXT")
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -193,6 +200,7 @@ class Board:
         role: object,
         checklist: object,
         created_by: str,
+        source: str | None = None,
         status: str,
         now: int,
     ) -> dict:
@@ -213,9 +221,9 @@ class Board:
         card_id = f"p-{uuid.uuid4().hex[:8]}"
         conn.execute(
             "INSERT INTO cards (id, title, desc, labels, priority, status, role, holder,"
-            " if_version, lease_until, checklist, report, comments, created_by,"
+            " if_version, lease_until, checklist, report, comments, created_by, source,"
             " created_at, updated_at, deleted)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, NULL, ?, NULL, '[]', ?, ?, ?, 0)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, NULL, ?, NULL, '[]', ?, ?, ?, ?, 0)",
             (
                 card_id,
                 title,
@@ -226,6 +234,7 @@ class Board:
                 role,
                 json.dumps(items, ensure_ascii=False),
                 created_by,
+                source,
                 now,
                 now,
             ),
@@ -297,6 +306,7 @@ class Board:
                 role=role,
                 checklist=checklist,
                 created_by=actor.role_id,
+                source=actor.session_id,  # 裁决 31: the conversation to report back to
                 status="todo",
                 now=now,
             )

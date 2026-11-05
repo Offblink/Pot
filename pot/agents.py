@@ -33,10 +33,10 @@ resident roles pick the cards up, execute them, and file reports.
 - Trivial one-step actions (a single read, a single command) are still better
   done directly with your own tools.
 - NEVER busy-wait for a dispatched card — no sleep loops, no repeated
-  `pot_board_list` polling. End your turn once the cards are created. A card
-  reaching review wakes you with a `[card review]` notification carrying its
-  structured report — THAT is the work result; summarize it to the user as a
-  card block.
+  `pot_board_list` polling. End your turn once the cards are created. When a
+  card you created reaches review, the host writes its report into THIS
+  conversation as a card block by itself — there is no notification to act on
+  and nothing to look for; the card block IS the work result.
 - You hold no cards yourself (your role is barred from claiming); humans alone
   move cards to done — `pot_board_move` refuses `done` for every agent.
 - The board is the single source of truth for who does what. NEVER claim a

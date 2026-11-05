@@ -127,22 +127,51 @@ def test_cards_in_review_tracks_the_column(env):
     assert dispatch.cards_in_review() - {card["id"]} == set()  # set semantics
 
 
-def test_latest_user_session_picks_the_newest_non_role_session(env):
-    dispatch.role_session(env.roles.get("exec"))  # a role session must never be the target
-    session.save_session("user-1", "chat", [{"role": "user", "content": "hi"}])
-    assert dispatch.latest_user_session() == "user-1"
-    assert dispatch.latest_user_session(exclude="user-1") is None
-    session.save_session("user-2", "chat2", [{"role": "user", "content": "hi"}])
-    assert dispatch.latest_user_session() == "user-2"  # newest first
-
-
-def test_review_note_carries_title_and_report():
-    note = dispatch.review_note(
-        [{"id": "p-1", "title": "the task", "report": {"summary": "shipped it"}}]
+def test_review_route_gates_on_a_live_role_less_source(env):
+    """裁决 31: only the conversation that dispatched the card gets it back."""
+    env.roles.create(
+        {"id": "chat", "name": "Chat", "canCreateCard": True, "canClaim": False}, "human"
     )
-    assert "[card review]" in note
-    assert "p-1" in note and "the task" in note and "shipped it" in note
-    assert "do NOT redo" in note
+    session.save_session("chat-1", "chat", [{"role": "user", "content": "hi"}])
+    exec_sid = dispatch.role_session(env.roles.get("exec"))  # a role session: never a target
+
+    routed = dispatch.review_route(
+        [
+            env.board.create(Actor("chat", "chat-1"), "real task"),
+            env.board.create(Actor("chat", "gone"), "orphan"),  # source deleted
+            env.board.create(Actor("chat", exec_sid), "role-made"),
+            env.board.human_create("seed card"),  # human cards carry no source
+        ]
+    )
+    assert list(routed) == ["chat-1"]
+    assert [c["title"] for c in routed["chat-1"]] == ["real task"]
+
+
+def test_review_block_is_the_report_without_the_chatter():
+    cards = [
+        {
+            "id": "p-1",
+            "title": "the task",
+            "priority": "urgent",
+            "role": "executor",
+            "report": {"summary": "shipped it"},
+        }
+    ]
+    zh = dispatch.review_block(cards)
+    assert "p-1" in zh and "the task" in zh and "shipped it" in zh and "urgent" in zh
+    assert "[card review]" not in zh and "This note is for you" not in zh
+    en = dispatch.review_block(cards, lang="en")
+    assert "Card ready for review" in en and "shipped it" in en
+
+
+def test_create_stamps_the_dispatching_session_as_source(env):
+    """裁决 31: source is what makes 「you dispatched」 true later."""
+    env.roles.create(
+        {"id": "chat", "name": "Chat", "canCreateCard": True, "canClaim": False}, "human"
+    )
+    session.save_session("chat-1", "chat", [{"role": "user", "content": "hi"}])
+    assert env.board.create(Actor("chat", "chat-1"), "task")["source"] == "chat-1"
+    assert env.board.human_create("human card")["source"] is None
 
 
 # ---- default singleton seeds the system Planner role ----

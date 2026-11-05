@@ -225,3 +225,15 @@ def test_deleting_a_session_forgets_its_alert(alerts_env):
     with urllib.request.urlopen(req, timeout=10) as resp:
         assert json.loads(resp.read())["ok"] is True
     assert webui.session_alerts() == {}
+
+
+def test_sessions_list_hides_role_sessions(alerts_env):
+    """裁决 29: role sessions are the agents' memory, not conversations — the
+    sidebar's source list never carries them; the file stays openable by id."""
+    base, _runtime = alerts_env
+    session_mod.save_session("chat-1", "my chat", [{"role": "user", "content": "hi"}])
+    session_mod.save_session("exec-1", "执行者", [{"role": "user", "content": "hi"}], role="exec")
+
+    ids = [row["id"] for row in _get(base, "/sessions")["sessions"]]
+    assert "chat-1" in ids and "exec-1" not in ids
+    assert _get(base, "/session?id=exec-1")["messages"][0]["content"] == "hi"

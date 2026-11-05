@@ -184,32 +184,57 @@ def dispatch_pending(run_turn) -> int:
         _CYCLE.release()
 
 
-# ---- review notification (spec §3.3: 进 review 通知 Planner) ----
+# ---- review notification (spec §3.3 / 裁决 30-31) ----
 
 
 def cards_in_review() -> set[str]:
     return {str(c["id"]) for c in board().list(status="review")}
 
 
-def latest_user_session(exclude: str | None = None) -> str | None:
-    """The conversation to notify: newest session without a role key — the
-    Planner. list_sessions() is newest-first."""
-    for entry in session.list_sessions():
-        sid = str(entry.get("id") or "")
-        if sid and not entry.get("role") and sid != exclude:
-            return sid
-    return None
+def review_route(cards: list[dict]) -> dict[str, list[dict]]:
+    """Cards to the conversation that dispatched them — and only that one.
+
+    裁决 31: a card created inside a conversation carries `source` = that
+    session, and it is notified only while the session still exists and is a
+    human conversation (no `role` key). Cards with no source (human/seed) and
+    cards sourced to a role session stay off chat entirely — the board already
+    shows their review state.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for card in cards:
+        source = str(card.get("source") or "")
+        if not source:
+            continue
+        data = session.load_session(source)
+        if data is None or data.get("role"):
+            continue
+        buckets.setdefault(source, []).append(card)
+    return buckets
 
 
-def review_note(cards: list[dict]) -> str:
-    rows = []
+def review_block(cards: list[dict], lang: str = "zh") -> str:
+    """裁决 30: the report as one host-rendered card block.
+
+    No model turn and no internal-note wording: the executor already wrote the
+    structured summary, so the transcript gains the value and none of the
+    chatter ("Take as little human attention as possible...").
+    """
+    zh = lang != "en"
+    head = (
+        "📋 **卡片待验收** —— 报告已到，去看板验收（✓ 完成 / ✗ 退回）"
+        if zh
+        else "📋 **Card ready for review** — the report is in; accept or reject it on the board"
+    )
+    parts = [head]
     for card in cards:
         report = card.get("report") or {}
-        summary = str(report.get("summary") or "(no structured summary)")[:1500]
-        rows.append(f'- {card["id"]} "{card["title"]}"\n  report: {summary}')
-    return (
-        "[card review] Card(s) you dispatched reached REVIEW — a human alone will"
-        " accept or reject them. Their structured reports are attached. This note"
-        " is for you; the user sees your reply, not this note. Summarize each"
-        " report to the user as a card block, and do NOT redo the work.\n" + "\n".join(rows)
-    )
+        summary = str(
+            report.get("summary") or ("（无结构化摘要）" if zh else "(no structured summary)")
+        )[:1500]
+        facts = " · ".join(
+            fact
+            for fact in (str(card.get("priority") or ""), str(card.get("role") or ""))
+            if fact and fact != "None"
+        )
+        parts.append(f"**`{card.get('id')}` · {card.get('title')}**\n{facts}\n\n{summary}")
+    return "\n\n".join(parts)

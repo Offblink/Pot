@@ -698,6 +698,24 @@ function pollJobs() {
       });
     })
     .catch(() => {});
+  pollNewMessages();
+}
+
+/* A host-appended message (the review card block, 裁决 30) lands with no turn
+   stream to carry it: the same 3 s poll notices the transcript grew while the
+   session is idle and repaints from disk. `after` is the client's cursor —
+   an optimistic send can sit ahead of the server, and then total simply
+   doesn't grow and nothing happens. */
+function pollNewMessages() {
+  if (!currentSessionId || turn || processing) return;
+  fetch('/session?id=' + encodeURIComponent(currentSessionId) + '&after=' + rawMessages.length)
+    .then(r => r.json())
+    .then(d => {
+      if (d && typeof d.total === 'number' && d.total > rawMessages.length) {
+        reloadSessionFromServer();
+      }
+    })
+    .catch(() => {});
 }
 
 /* One interval only: re-arming on every session open/close clears the old one,
@@ -1151,7 +1169,7 @@ document.getElementById('theme-switch').addEventListener('click', function () {
    session this page is showing (that is what stops the ring). Painted on
    creation AND on every reuse: rows are reconciled in place keyed by id, so a
    dot added once would otherwise never come off again. */
-const ALERT_LABEL = { ask: T('alert.ask'), done: T('alert.done'), error: T('alert.error') };
+const ALERT_LABEL = { ask: T('alert.ask'), done: T('alert.done'), error: T('alert.error'), card: T('alert.card') };
 
 function paintAlert(row, kind) {
   let dot = row.querySelector('.session-dot');

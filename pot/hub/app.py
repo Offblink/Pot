@@ -309,7 +309,9 @@ class _Handler(BaseHTTPRequestHandler):
             if url.path == "/api/poll":
                 self._poll(params)
             elif url.path == "/api/sessions":
-                self._reply({"sessions": self.hub.store.sessions.list_sessions()})
+                # 裁决 29: role sessions never surface to a user-facing list.
+                rows = self.hub.store.sessions.list_sessions()
+                self._reply({"sessions": [r for r in rows if not r.get("role")]})
             elif url.path == "/api/session":
                 self._session_load(params)
             elif url.path == "/api/board":

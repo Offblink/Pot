@@ -54,6 +54,16 @@ def test_sessions_api(room):
     assert out["sessions"] == []
 
 
+def test_sessions_api_hides_role_sessions(room):
+    """裁决 29: the hub's session list carries conversations only."""
+    hub, clients = room
+    hub.store.sessions.save("role-1", "执行者", [{"role": "user", "content": "hi"}], role="exec")
+    hub.store.sessions.save("chat-1", "chat", [{"role": "user", "content": "hi"}])
+    code, out = clients["alpha"].get("/api/sessions?token=room-token")
+    ids = [s["id"] for s in out["sessions"]]
+    assert code == 200 and "chat-1" in ids and "role-1" not in ids
+
+
 def test_poll_route_stays_alive(room):
     """spec §10-3: /api/poll must survive the room-protocol cut (§1.2)."""
     _hub, clients = room
