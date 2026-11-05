@@ -191,10 +191,12 @@ private fun BoardColumns(state: PotState) {
             val shown = cards.take(VISIBLE_PER_COLUMN)
             val older = cards.size - shown.size
             Column(
-                // Equal shares, no horizontal scroll: this box runs at 150% DPI,
-                // so the 1180px window is only ~787dp wide — six fixed 176dp
-                // columns would push the last two columns off screen.
-                Modifier.weight(1f).fillMaxHeight()
+                // Equal shares for columns that carry cards; a column with
+                // nothing in it shrinks (空列收窄) so the columns with work keep
+                // the room. No horizontal scroll either way: this box runs at
+                // 150% DPI, so the 1180px window is only ~787dp wide — six fixed
+                // 176dp columns would push the last two off screen.
+                Modifier.weight(if (cards.isEmpty()) 0.55f else 1f).fillMaxHeight()
                     .background(p.surface, RoundedCornerShape(12.dp))
                     .border(1.dp, p.outline, RoundedCornerShape(12.dp))
                     .padding(6.dp),
@@ -640,7 +642,7 @@ private fun ArchiveDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onClose) { Text(Strings.t("关闭", "Close")) }
+            MiniActionButton(Strings.t("关闭", "Close"), p.muted, onClose)
         },
     )
 }
