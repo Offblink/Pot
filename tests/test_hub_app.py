@@ -82,7 +82,7 @@ from types import SimpleNamespace  # noqa: E402
 import pytest  # noqa: E402
 
 from pot.board import Board  # noqa: E402
-from pot.roles import Actor, RoleRepo  # noqa: E402
+from pot.roles import RoleRepo  # noqa: E402
 
 TOKEN = "t0k"
 
@@ -141,76 +141,27 @@ def test_host_status_answers_for_the_launcher(launcher):
     assert out["version"]  # pot version string, non-empty
 
 
-def test_board_create_list_complete_via_api(launcher):
-    code, out = _post(
-        launcher, "/api/board/create", {"title": "task", "labels": ["coding"], "priority": "urgent"}
-    )
-    assert code == 200 and out["ok"]
-    card = out["card"]
-    assert card["status"] == "todo" and card["createdBy"] == "human"
+def test_board_list_stays_for_the_launcher_actions_move_to_the_host(launcher):
+    # create/delete are host /board/* now (裁决 37) — the hub keeps the read.
+    code, out = _post(launcher, "/api/board/create", {"title": "task"})
+    assert code == 404
 
+    card = launcher.board.human_create("existing", labels=["coding"])
     code, out = _get(launcher, "/api/board")
     assert [c["id"] for c in out["cards"]] == [card["id"]]
     role_ids = {r["id"] for r in out["roles"]}
     assert {"exec", "planner"} <= role_ids  # system seed rides along
 
-    # the engine still refuses a human ✓ outside review (gate 5 the other way)
     code, out = _post(launcher, "/api/board/complete", {"card_id": card["id"], "if_version": 1})
-    assert code == 400 and "error" in out
-    assert launcher.board.get(card["id"])["status"] == "todo"
-
-    # reach review through the real agent gates, then the human accepts
-    actor = Actor("exec", "s1")
-    held = launcher.board.claim(actor, card["id"], card["ifVersion"])
-    launcher.board.move(actor, card["id"], "review", held["ifVersion"])
-    reviewed = launcher.board.get(card["id"])
-    code, out = _post(
-        launcher,
-        "/api/board/complete",
-        {"card_id": card["id"], "if_version": reviewed["ifVersion"]},
-    )
-    assert code == 200 and out["card"]["status"] == "done"
+    assert code == 404
+    code, out = _post(launcher, "/api/board/reject", {"card_id": card["id"], "if_version": 1})
+    assert code == 404
 
     # a stale token never reaches the board
     code, _out = _get(launcher, "/api/board", token="wrong")
     assert code == 403
     code, _out = _post(launcher, "/api/board/create", {"title": "x"}, token="wrong")
     assert code == 403
-
-
-def test_board_assign_reject_and_stale_version(launcher):
-    code, out = _post(launcher, "/api/board/create", {"title": "t", "labels": ["coding"]})
-    card = out["card"]
-
-    # assign to a role (and refuse one that does not exist)
-    code, out = _post(
-        launcher,
-        "/api/board/assign",
-        {"card_id": card["id"], "role": "exec", "if_version": card["ifVersion"]},
-    )
-    assert code == 200 and out["card"]["role"] == "exec"
-    code, out = _post(
-        launcher,
-        "/api/board/assign",
-        {"card_id": card["id"], "role": "ghost", "if_version": out["card"]["ifVersion"]},
-    )
-    assert code == 400 and "no_such_role" in out["error"]
-
-    # stale write token rejected, state untouched (exact code pinned elsewhere)
-    code, _out = _post(launcher, "/api/board/complete", {"card_id": card["id"], "if_version": 999})
-    assert code == 400
-    assert launcher.board.get(card["id"])["status"] == "todo"
-
-    # reject works on a held card and lands the reason in the comments
-    actor = Actor("exec", "s1")
-    held = launcher.board.claim(actor, card["id"], launcher.board.get(card["id"])["ifVersion"])
-    code, out = _post(
-        launcher,
-        "/api/board/reject",
-        {"card_id": card["id"], "reason": "needs tests", "if_version": held["ifVersion"]},
-    )
-    assert code == 200 and out["card"]["status"] == "todo"
-    assert any(c["text"] == "needs tests" for c in out["card"]["comments"])
 
 
 def test_roles_crud_via_api(launcher):

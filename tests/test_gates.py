@@ -1,4 +1,4 @@
-"""Seven code-level gates, one test each (spec §3.2). M1 acceptance: red → green."""
+"""Code-level gates, one test each (spec §3.2). M1 acceptance: red → green."""
 
 import pytest
 
@@ -75,38 +75,37 @@ def test_gate_stale_version(repo, board):
     with pytest.raises(PotError, match="stale_version"):
         board.comment(Actor("r1", "s1"), c["id"], "ping", 42)
     with pytest.raises(PotError, match="stale_version"):
-        board.human_complete(c["id"], 42)
+        board.human_reopen(c["id"], "why", 42)
 
 
-def test_gate_done_human_only(repo, board):
-    """闸 5 done 闸：agent 永远到不了 done，只能 → review；✓ 是人的。"""
+def test_gate_report_completes(repo, board):
+    """裁决 32: report 是抵达 done 的唯一路径；直接 move 拒绝。"""
     repo.create({"id": "r1"}, creator="human")
     c = _card(board)
     claimed = board.claim(Actor("r1", "s1"), c["id"], c["ifVersion"])
-    with pytest.raises(PotError, match="human_only"):
+    with pytest.raises(PotError, match="use_report"):
         board.move(Actor("r1", "s1"), c["id"], "done", claimed["ifVersion"])
 
-    review = board.move(Actor("r1", "s1"), c["id"], "review", claimed["ifVersion"])
-    done = board.human_complete(c["id"], review["ifVersion"])
+    done = board.report(Actor("r1", "s1"), c["id"], "shipped", claimed["ifVersion"])
     assert done["status"] == "done"
-    assert done["holder"] is None
+    assert done["holder"] == "r1:s1"  # kept as the completion signature (裁决 36)
     assert done["leaseUntil"] is None
 
 
-def test_gate_reject(repo, board):
-    """闸 6 退回：人 ✗ 回 todo、清 holder、原因进卡。"""
+def test_gate_reopen(repo, board):
+    """裁决 32: 人把 done 重开回 todo、清 holder、原因进卡。"""
     repo.create({"id": "r1"}, creator="human")
     c = _card(board)
     claimed = board.claim(Actor("r1", "s1"), c["id"], c["ifVersion"])
-    review = board.move(Actor("r1", "s1"), c["id"], "review", claimed["ifVersion"])
+    done = board.report(Actor("r1", "s1"), c["id"], "shipped", claimed["ifVersion"])
 
     with pytest.raises(PotError, match="need_reason"):
-        board.human_reject(c["id"], "", review["ifVersion"])
+        board.human_reopen(c["id"], "", done["ifVersion"])
 
-    back = board.human_reject(c["id"], "验收不过，重做", review["ifVersion"])
+    back = board.human_reopen(c["id"], "有 bug，重做", done["ifVersion"])
     assert back["status"] == "todo"
     assert back["holder"] is None
-    assert any("验收不过" in cm["text"] for cm in back["comments"])
+    assert any("有 bug，重做" in cm["text"] for cm in back["comments"])
 
 
 def test_gate_lease(repo, tmp_path):

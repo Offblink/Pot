@@ -18,7 +18,7 @@ from pot.errors import PotError
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _CREATORS = ("human", "planner")
 # Privilege keys a planner may never supply — rejected, never silently ignored.
-_PRIVILEGED = ("tools", "model", "wip", "canCreateCard")
+_PRIVILEGED = ("tools", "model", "wip", "maxInstances", "canCreateCard")
 
 
 @dataclass(frozen=True)
@@ -43,6 +43,8 @@ class Role:
     tools: list[str] = field(default_factory=list)
     model: str | None = None
     wip: int = 2
+    # 裁决 33: how many instances (sessions) this role may auto-grow to.
+    maxInstances: int = 3
     canClaim: list[str] | bool = field(default_factory=list)  # [] = every label; false = barred
     canCreateCard: bool = False
     template: str | None = None
@@ -61,6 +63,7 @@ class Role:
             "tools": list(self.tools),
             "model": self.model,
             "wip": self.wip,
+            "maxInstances": self.maxInstances,
             "canClaim": self.canClaim,
             "canCreateCard": self.canCreateCard,
             "template": self.template,
@@ -90,6 +93,12 @@ def _check(data: dict) -> dict:
         isinstance(data["wip"], bool) or not isinstance(data["wip"], int) or data["wip"] < 1
     ):
         raise PotError("bad_value", "wip")
+    if "maxInstances" in data and (
+        isinstance(data["maxInstances"], bool)
+        or not isinstance(data["maxInstances"], int)
+        or data["maxInstances"] < 1
+    ):
+        raise PotError("bad_value", "maxInstances")
     if "canClaim" in data:
         cc = data["canClaim"]
         if not (cc is False or (isinstance(cc, list) and all(isinstance(x, str) for x in cc))):
@@ -156,6 +165,7 @@ class RoleRepo:
             fields["tools"] = list(tpl.tools)
             fields["model"] = tpl.model
             fields["wip"] = tpl.wip
+            fields["maxInstances"] = tpl.maxInstances
             fields["canCreateCard"] = tpl.canCreateCard
         fields["createdBy"] = creator  # provenance comes from the actor, not the payload
         role = Role.from_dict(fields)

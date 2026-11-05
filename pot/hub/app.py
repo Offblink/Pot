@@ -3,8 +3,9 @@
 Token auth on every endpoint. The room-protocol family (join/leave/heartbeat/
 send/fs), the friend/mail routes and the transfer routes are gone with the
 rooms; what stays is the session store family plus the launcher's API
-(spec §4.1: the CMP launcher rides /api/board/*, /api/roles/*,
-/api/host/status over this loopback server).
+(spec §4.1: the CMP launcher rides /api/board (read-only, for the roles page),
+/api/roles/*, /api/host/status over this loopback server; the board *actions*
+moved to the WebUI host's /board/* with 裁决 37).
 """
 
 import json
@@ -202,71 +203,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._save(body)
             elif path == "/api/session/delete":
                 self._session_delete(body)
-            # launcher board/roles API (spec §4.1) — human actions, human token
-            elif path == "/api/board/create":
-                self._reply(
-                    {
-                        "ok": True,
-                        "card": self.hub.board.human_create(
-                            str(body.get("title") or ""),
-                            desc=str(body.get("desc") or ""),
-                            labels=body.get("labels"),
-                            priority=str(body.get("priority") or "normal"),
-                            role=body.get("role"),
-                            checklist=body.get("checklist"),
-                            status=str(body.get("status") or "todo"),
-                        ),
-                    }
-                )
-            elif path == "/api/board/assign":
-                self._reply(
-                    {
-                        "ok": True,
-                        "card": self.hub.board.human_assign(
-                            str(body.get("card_id") or ""),
-                            body.get("role"),
-                            body.get("if_version"),
-                        ),
-                    }
-                )
-            elif path == "/api/board/complete":
-                self._reply(
-                    {
-                        "ok": True,
-                        "card": self.hub.board.human_complete(
-                            str(body.get("card_id") or ""), body.get("if_version")
-                        ),
-                    }
-                )
-            elif path == "/api/board/reject":
-                self._reply(
-                    {
-                        "ok": True,
-                        "card": self.hub.board.human_reject(
-                            str(body.get("card_id") or ""),
-                            str(body.get("reason") or ""),
-                            body.get("if_version"),
-                        ),
-                    }
-                )
-            elif path == "/api/board/renew":
-                self._reply(
-                    {
-                        "ok": True,
-                        "card": self.hub.board.human_renew_lease(
-                            str(body.get("card_id") or ""), body.get("if_version")
-                        ),
-                    }
-                )
-            elif path == "/api/board/delete":
-                self._reply(
-                    {
-                        "ok": True,
-                        "card": self.hub.board.human_delete(
-                            str(body.get("card_id") or ""), body.get("if_version")
-                        ),
-                    }
-                )
+            # launcher roles API (spec §4.1); board human actions moved to the
+            # WebUI host's /board/* when the launcher lost its board page (裁决 37)
             elif path == "/api/roles/create":
                 fields = {k: v for k, v in body.items() if k != "token"}
                 self._reply({"ok": True, "role": self.hub.roles.create(fields, "human").to_dict()})

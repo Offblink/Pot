@@ -114,17 +114,18 @@ def _apply_delta(tool_acc: dict[int, dict], delta: dict) -> None:
 
 
 def _wire_messages(messages: list[dict]) -> list[dict]:
-    """Messages as the provider should see them: `ts` is the transcript's own
-    stamp (the WebUI hover label), not part of the protocol. Returns the list
-    untouched when there is nothing to strip — the common case, and the reason
-    this costs no copies.
+    """Messages as the provider should see them: `ts` (the transcript's own
+    hover stamp) and `internal` (裁决 35, our host-note flag) are ours, not the
+    protocol's. Returns the list untouched when there is nothing to strip —
+    the common case, and the reason this costs no copies.
 
     `reasoning` is ours too but has always shipped upstream, so it stays: this
-    only keeps a stamp we invented today from inventing a new wire field.
+    only keeps fields we invented from inventing new wire keys.
     """
-    if not any("ts" in m for m in messages):
+    ours = ("ts", "internal")
+    if not any(k in m for m in messages for k in ours):
         return messages
-    return [{k: v for k, v in m.items() if k != "ts"} for m in messages]
+    return [{k: v for k, v in m.items() if k not in ours} for m in messages]
 
 
 def stream_chat(

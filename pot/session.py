@@ -97,9 +97,12 @@ def new_session_id() -> str:
 
 
 def get_session_title(messages: list[dict[str, Any]]) -> str:
-    """Title = first user message, collapsed whitespace, capped at 50 chars."""
+    """Title = first user message, collapsed whitespace, capped at 50 chars.
+
+    Internal host notes (裁决 35) are not the user's words and never title a
+    conversation."""
     for msg in messages:
-        if msg.get("role") == "user":
+        if msg.get("role") == "user" and not msg.get("internal"):
             text = " ".join(str(msg.get("content", "")).split())
             return text[:47] + "..." if len(text) > 50 else text
     return "(empty)"
@@ -137,6 +140,7 @@ class SessionStore:
                     "msgCount": len(data.get("messages", [])),
                     "pinned": bool(data.get("pinned")),
                     "role": data.get("role"),
+                    "instance": data.get("instance"),  # 裁决 33: role instance number
                 }
             )
         return result

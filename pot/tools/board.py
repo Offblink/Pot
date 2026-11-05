@@ -39,7 +39,7 @@ SCHEMAS: dict[str, dict] = {
         "List board cards. Filter by column (status), role (expected role or current"
         " holder), and labels (cards carrying any of them).",
         {
-            "status": {"type": "string", "description": "backlog|todo|doing|review|done|blocked"},
+            "status": {"type": "string", "description": "todo|doing|done|blocked"},
             "role": {"type": "string"},
             "labels": {"type": "array", "items": {"type": "string"}},
             "include_deleted": {"type": "boolean"},
@@ -74,8 +74,8 @@ SCHEMAS: dict[str, dict] = {
     ),
     "pot_board_move": schema(
         "pot_board_move",
-        "Move a card you hold: doing→review|blocked, review→doing|blocked,"
-        " blocked→doing. done is human-only.",
+        "Move a card you hold: doing→blocked, blocked→doing. done is reached"
+        " only by pot_board_report.",
         {"card_id": _ID, "to": {"type": "string"}, "if_version": _VERSION},
         ["card_id", "to", "if_version"],
     ),
@@ -98,8 +98,8 @@ SCHEMAS: dict[str, dict] = {
     ),
     "pot_board_report": schema(
         "pot_board_report",
-        "Submit the structured report (holder only); the card moves to review for"
-        " human acceptance.",
+        "Submit the structured report (holder only); the card completes (done)"
+        " with the report as the deliverable.",
         {
             "card_id": _ID,
             "summary": {"type": "string"},
@@ -114,6 +114,19 @@ SCHEMAS: dict[str, dict] = {
         "pot_board_release",
         "Voluntarily drop a card you hold back to todo, with a reason.",
         {"card_id": _ID, "reason": {"type": "string"}, "if_version": _VERSION},
+        ["card_id", "reason", "if_version"],
+    ),
+    "pot_board_reassign": schema(
+        "pot_board_reassign",
+        "Planner only (裁决 34): send a live card back to todo under a (possibly"
+        " different) role, with a reason. Clears holder and lease; the reason"
+        " lands in the card's comments.",
+        {
+            "card_id": _ID,
+            "to_role": {"type": "string", "description": "new expected role; omit to unpin"},
+            "reason": {"type": "string"},
+            "if_version": _VERSION,
+        },
         ["card_id", "reason", "if_version"],
     ),
 }
@@ -135,7 +148,7 @@ def _ok(payload: dict) -> str:
 
 
 def make_tools(board: Board, actor: Actor) -> dict[str, Callable[..., str]]:
-    """The nine pot_board_* tools bound to one actor (role + session)."""
+    """The ten pot_board_* tools bound to one actor (role + session)."""
 
     @_guard
     def pot_board_list(
@@ -214,6 +227,12 @@ def make_tools(board: Board, actor: Actor) -> dict[str, Callable[..., str]]:
     def pot_board_release(card_id: str, reason: str, if_version: int) -> str:
         return _ok({"card": board.release(actor, card_id, reason, if_version)})
 
+    @_guard
+    def pot_board_reassign(
+        card_id: str, reason: str, if_version: int, to_role: str | None = None
+    ) -> str:
+        return _ok({"card": board.reassign(actor, card_id, to_role, reason, if_version)})
+
     bound = (
         pot_board_list,
         pot_board_get,
@@ -224,5 +243,6 @@ def make_tools(board: Board, actor: Actor) -> dict[str, Callable[..., str]]:
         pot_board_checklist,
         pot_board_report,
         pot_board_release,
+        pot_board_reassign,
     )
     return {fn.__name__: fn for fn in bound}

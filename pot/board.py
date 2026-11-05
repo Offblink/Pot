@@ -1,4 +1,4 @@
-"""Board engine: sqlite card ledger + the seven code-level gates (spec §3.2, §7).
+"""Board engine: sqlite card ledger + the code-level gates (spec §3.2, §7).
 
 Storage: data/board.sqlite in WAL mode. Every operation opens its own
 connection and runs inside one BEGIN IMMEDIATE transaction (single writer),
@@ -10,7 +10,7 @@ not_holder, bad_status, bad_transition, cant_create, no_such_card, no_such_role,
 need_reason, need_evidence, need_text, need_summary, bad_index, bad_value.
 
 Column lease policy: the lease ticks only while status == doing; entering
-review/blocked clears it, re-entering doing re-arms it (spec §3.2 租约).
+done/blocked clears it, re-entering doing re-arms it (spec §3.2 租约).
 """
 
 from __future__ import annotations
@@ -26,16 +26,15 @@ from pathlib import Path
 from pot.errors import PotError
 from pot.roles import Actor, RoleRepo
 
-STATUSES = ("backlog", "todo", "doing", "review", "done", "blocked")
+STATUSES = ("todo", "doing", "done", "blocked")  # backlog/review 退役（裁决 32）
 _PRIORITIES = ("urgent", "normal", "low")
-_HUMAN_CREATE_STATUSES = ("backlog", "todo")
-_REJECTABLE = ("doing", "review", "blocked")
+_HUMAN_CREATE_STATUSES = ("todo",)
+_REJECTABLE = ("doing", "blocked")
 
-# Agent transitions between held columns; done only via human ✓ (gate 5),
-# todo via release/reject, backlog→todo via planning privilege (canCreateCard).
+# Agent transitions between held columns; done only via report (裁决 32),
+# todo via release. Both directions of blocked stay with the holder.
 _AGENT_MOVES: dict[str, frozenset[str]] = {
-    "doing": frozenset({"review", "blocked"}),
-    "review": frozenset({"doing", "blocked"}),
+    "doing": frozenset({"blocked"}),
     "blocked": frozenset({"doing"}),
 }
 
@@ -119,6 +118,11 @@ class Board:
             # never re-runs an existing table's definition).
             if not any(col["name"] == "source" for col in conn.execute("PRAGMA table_info(cards)")):
                 conn.execute("ALTER TABLE cards ADD COLUMN source TEXT")
+            # 裁决 32: backlog/review are retired — migrate what is already on
+            # disk (idempotent: afterwards no row keeps those statuses). The
+            # review holder stays as the completion signature (裁决 36 rows).
+            conn.execute("UPDATE cards SET status='todo' WHERE status='backlog'")
+            conn.execute("UPDATE cards SET status='done', lease_until=NULL WHERE status='review'")
 
     @contextmanager
     def _db(self) -> Iterator[sqlite3.Connection]:
@@ -336,12 +340,14 @@ class Board:
                 raise PotError("role_mismatch", f"{sorted(labels)} not in {role.canClaim}")
             if row["role"] is not None and row["role"] != actor.role_id:
                 raise PotError("role_mismatch", f"card wants role {row['role']}")
+            # 裁决 33: WIP counts per instance — holder is role:session, so the
+            # exact match is this instance's own held set.
             held = conn.execute(
-                "SELECT COUNT(*) FROM cards WHERE deleted=0 AND status!='done' AND holder GLOB ?",
-                (f"{actor.role_id}:*",),
+                "SELECT COUNT(*) FROM cards WHERE deleted=0 AND status!='done' AND holder=?",
+                (actor.holder,),
             ).fetchone()[0]
             if held >= role.wip:
-                raise PotError("wip_full", f"{actor.role_id} holds {held}/{role.wip}")
+                raise PotError("wip_full", f"{actor.holder} holds {held}/{role.wip}")
             return self._apply(
                 conn,
                 card_id,
@@ -362,18 +368,15 @@ class Board:
             row = self._fetch(conn, card_id)
             self._check_version(row, if_version)
             if to == "done":
-                raise PotError("human_only", "agents can only reach review")
+                # 裁决 32: done is reached by pot_board_report, never by a move.
+                raise PotError("use_report", "done only via pot_board_report")
             sets: dict[str, object] = {"status": to}
             if row["holder"] is None:
-                if not (row["status"] == "backlog" and to == "todo"):
-                    raise PotError("not_holder", card_id)
-                if not self.roles.get(actor.role_id).canCreateCard:
-                    raise PotError("cant_create", actor.role_id)
-            else:
-                if row["holder"] != actor.holder:
-                    raise PotError("already_held", f"{card_id} held by {row['holder']}")
-                if to not in _AGENT_MOVES.get(row["status"], frozenset()):
-                    raise PotError("bad_transition", f"{row['status']} → {to}")
+                raise PotError("not_holder", card_id)
+            if row["holder"] != actor.holder:
+                raise PotError("already_held", f"{card_id} held by {row['holder']}")
+            if to not in _AGENT_MOVES.get(row["status"], frozenset()):
+                raise PotError("bad_transition", f"{row['status']} → {to}")
             sets["lease_until"] = now + self.lease_seconds if to == "doing" else None
             return self._apply(conn, card_id, sets, now)
 
@@ -430,19 +433,23 @@ class Board:
             self._check_version(row, if_version)
             self._require_holder(row, actor)
             if row["status"] != "doing":
-                raise PotError("bad_transition", f"{row['status']} → review")
+                raise PotError("bad_transition", f"{row['status']} → done")
             stored = {
                 "summary": summary,
                 "files": _str_list(files, "files"),
                 "selfTest": self_test or "",
                 "risks": risks or "",
             }
+            # 裁决 32: the report IS the completion — no review detour, and the
+            # card leaves the instance's WIP (the query ignores done holders).
+            # holder STAYS as the signature: the scene's 已完成 rows show
+            # 身份#编号 (reopen/reassign clear it later).
             return self._apply(
                 conn,
                 card_id,
                 {
                     "report": json.dumps(stored, ensure_ascii=False),
-                    "status": "review",
+                    "status": "done",
                     "lease_until": None,
                 },
                 now,
@@ -502,33 +509,8 @@ class Board:
                 now=now,
             )
 
-    def human_assign(self, card_id: str, role: str | None, if_version: object) -> dict:
-        if role is not None:
-            self.roles.get(str(role))  # must exist → no_such_role
-        now = int(time.time())
-        with self._db() as conn, _tx(conn):
-            self._sweep(conn, now)
-            row = self._fetch(conn, card_id)
-            self._check_version(row, if_version)
-            if row["status"] == "done":
-                raise PotError("bad_transition", "done is final")
-            if row["holder"] is not None:
-                raise PotError("already_held", f"{card_id} held by {row['holder']}")
-            return self._apply(conn, card_id, {"role": role}, now)
-
-    def human_complete(self, card_id: str, if_version: object) -> dict:
-        now = int(time.time())
-        with self._db() as conn, _tx(conn):
-            self._sweep(conn, now)
-            row = self._fetch(conn, card_id)
-            self._check_version(row, if_version)
-            if row["status"] != "review":
-                raise PotError("bad_transition", f"{row['status']} → done")
-            return self._apply(
-                conn, card_id, {"status": "done", "holder": None, "lease_until": None}, now
-            )
-
-    def human_reject(self, card_id: str, reason: str, if_version: object) -> dict:
+    def human_reopen(self, card_id: str, reason: str, if_version: object) -> dict:
+        """裁决 32: the human's board action left — done → todo, reason in comments."""
         if not isinstance(reason, str) or not reason.strip():
             raise PotError("need_reason", card_id)
         now = int(time.time())
@@ -536,7 +518,7 @@ class Board:
             self._sweep(conn, now)
             row = self._fetch(conn, card_id)
             self._check_version(row, if_version)
-            if row["status"] not in _REJECTABLE:
+            if row["status"] != "done":
                 raise PotError("bad_transition", f"{row['status']} → todo")
             comments = json.loads(row["comments"])
             comments.append({"by": "human", "text": reason, "at": now})
@@ -552,17 +534,43 @@ class Board:
                 now,
             )
 
-    def human_renew_lease(self, card_id: str, if_version: object) -> dict:
+    def reassign(
+        self,
+        actor: Actor,
+        card_id: str,
+        to_role: str | None,
+        reason: str,
+        if_version: object,
+    ) -> dict:
+        """裁决 34: the planner's intervention — a live card goes back to todo
+        under a (possibly different) role; holder/lease clear, reason in comments."""
+        if actor.role_id != "planner":
+            raise PotError("planner_only", actor.role_id)
+        if not isinstance(reason, str) or not reason.strip():
+            raise PotError("need_reason", card_id)
+        if to_role is not None:
+            self.roles.get(str(to_role))  # must exist → no_such_role
         now = int(time.time())
         with self._db() as conn, _tx(conn):
             self._sweep(conn, now)
             row = self._fetch(conn, card_id)
             self._check_version(row, if_version)
-            if row["holder"] is None:
-                raise PotError("no_holder", card_id)
-            if row["status"] != "doing":
-                raise PotError("bad_transition", f"{row['status']} has no lease")
-            return self._apply(conn, card_id, {"lease_until": now + self.lease_seconds}, now)
+            if row["status"] not in ("todo", "doing", "blocked"):
+                raise PotError("bad_transition", f"{row['status']} → todo")
+            comments = json.loads(row["comments"])
+            comments.append({"by": actor.holder, "text": reason, "at": now})
+            return self._apply(
+                conn,
+                card_id,
+                {
+                    "role": to_role,
+                    "status": "todo",
+                    "holder": None,
+                    "lease_until": None,
+                    "comments": json.dumps(comments, ensure_ascii=False),
+                },
+                now,
+            )
 
     def human_delete(self, card_id: str, if_version: object) -> dict:
         now = int(time.time())

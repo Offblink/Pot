@@ -71,6 +71,9 @@ shell commands, search code, and access the web. Core rules:
 
 - Tool output is truncated at ~16000 chars. Plan reads accordingly.
 - After completing a task, summarize what you did.
+- Host wake-ups marked internal (background job reports, stuck-card notes)
+  are never shown to the user. If your continuation adds nothing to what you
+  already told them, end with `<<SILENT>>`; otherwise say only what changed.
 - NEVER fabricate file contents or command output.
 - If a tool returns no results or an error, try a different approach —
   don't just give up.

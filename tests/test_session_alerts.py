@@ -44,6 +44,11 @@ def alerts_env(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path / "sessions")
     webui.clear_alerts()
+    # A turn schedules _after_turn on a daemon thread; left armed, it walks the
+    # REAL board and can fire a late error alert into whichever test is running
+    # by then (observed flake). These tests watch alerts, not dispatch.
+    monkeypatch.setattr(webui.dispatch, "dispatch_pending", lambda run: 0)
+    monkeypatch.setattr(webui.jobs, "flush", lambda sid: [])
 
     class _Scripted(webui.WebUIRuntime):
         script = staticmethod(lambda sink, should_abort: _Agent())
@@ -225,6 +230,24 @@ def test_deleting_a_session_forgets_its_alert(alerts_env):
     with urllib.request.urlopen(req, timeout=10) as resp:
         assert json.loads(resp.read())["ok"] is True
     assert webui.session_alerts() == {}
+
+
+def test_internal_note_persists_flagged_and_never_titles(alerts_env):
+    """裁决 35: a host wake-up is stored with `internal`, readable by the model,
+    and can never become the conversation's title."""
+    base, runtime = alerts_env
+    sid = _new_session(base)
+    webui._execute_turn(
+        sid,
+        "[job report] the quiet part",
+        sink=webui.WebSink(None, sid),
+        runtime=runtime,
+        internal=True,
+    )
+    data = session_mod.load_session(sid)
+    user_rows = [m for m in data["messages"] if m.get("role") == "user"]
+    assert user_rows and user_rows[-1].get("internal") is True
+    assert "[job report]" not in session_mod.get_session_title(data["messages"])
 
 
 def test_sessions_list_hides_role_sessions(alerts_env):

@@ -50,19 +50,20 @@ def test_concurrent_claim_single_winner(repo, board):
 
 
 def test_concurrent_wip_respected(repo, board):
-    """wip=2、8 线程抢 20 张：成功认领恰好 2 次。"""
+    """裁决 33: wip 按实例计——8 线程共抢同一个实例（wip=2）：成功恰好 2 次。"""
     repo.create({"id": "r1", "wip": 2}, creator="human")
     cards = [board.human_create(title=f"c{i}") for i in range(20)]
     lock = threading.Lock()
     successes = []
     barrier = threading.Barrier(8)
+    instance = Actor("r1", "shared-instance")  # every thread plays ONE instance
 
     def worker():
         barrier.wait()
         for c in cards:
             try:
                 fresh = board.get(c["id"])
-                board.claim(Actor("r1", f"s{threading.get_ident()}"), c["id"], fresh["ifVersion"])
+                board.claim(instance, c["id"], fresh["ifVersion"])
             except PotError:
                 continue
             with lock:
@@ -74,7 +75,9 @@ def test_concurrent_wip_respected(repo, board):
     for t in threads:
         t.join()
 
-    assert len(successes) == 2, successes
+    # The same instance may re-touch cards it already holds (holder re-claim =
+    # renew, by design) — the WIP gate is about how many DISTINCT cards it holds.
+    assert len(set(successes)) == 2, successes
     held = [c for c in cards if board.get(c["id"])["holder"] is not None]
     assert len(held) == 2
 

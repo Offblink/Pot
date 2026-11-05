@@ -328,7 +328,7 @@ def _session_lock(session_id: str) -> threading.Lock:
 # ── session alerts (§61): what wants the user's eyes ──
 #
 # Four things in a session want the user: the agent asked a question (an
-# in-turn `ask`), a turn finished, a turn failed, and a review card block
+# in-turn `ask`), a turn finished, a turn failed, and a completion card block
 # landed (裁决 30). An alert is raised only when
 # nobody is *showing* that session: the page that has it open — visible and
 # focused, because a minimized webUI is not "opened" (user rule, 2026-09-21)
@@ -611,14 +611,36 @@ class YesSirHandler(BaseHTTPRequestHandler):
             sid = (parse_qs(url.query).get("sessionId") or [None])[0]
             self._send_json({"jobs": jobs.list_jobs(sid)})
         elif route == "/board":
-            # Human side of the board (spec §3.5; the launcher's page in M4
-            # consumes the same shape). Loopback-gated like every data route.
+            # The scene's whole data feed (裁决 36): cards + roles + the mounted
+            # role instances with what each is holding. Loopback-gated like
+            # every data route.
+            cards = self.runtime.board().list()
+            instances = []
+            for row in session.list_sessions():
+                rid = row.get("role")
+                if not rid:
+                    continue  # conversations are not agents (裁决 29)
+                sid = str(row.get("id") or "")
+                held = [c for c in cards if c.get("holder") == f"{rid}:{sid}"]
+                stuck = any(c.get("status") == "blocked" for c in held)
+                working = any(c.get("status") == "doing" for c in held)
+                instances.append(
+                    {
+                        "role": rid,
+                        "session": sid,
+                        "number": int(row.get("instance") or 1),
+                        "status": "stuck" if stuck else ("working" if working else "idle"),
+                        "cards": [c["id"] for c in held],
+                    }
+                )
+            instances.sort(key=lambda x: (x["role"], x["number"]))
             self._send_json(
                 {
-                    "cards": self.runtime.board().list(),
+                    "cards": cards,
                     "roles": [
                         r.to_dict() for r in self.runtime.roles_repo().list(include_templates=True)
                     ],
+                    "instances": instances,
                 }
             )
         else:
@@ -663,25 +685,41 @@ class YesSirHandler(BaseHTTPRequestHandler):
             data = self._read_body()
             ok = jobs.kill(str(data.get("id") or ""))
             self._send_json({"ok": ok}, status=200 if ok else 404)
-        elif url.path == "/board/complete":
-            # Human ✓ (done is human-only, gate 5). The launcher's board page
-            # posts the same shape in M4.
+        elif url.path == "/board/create":
+            # 人建卡（裁决 37: the launcher board page is gone — the WebUI's
+            # center board posts here).
             data = self._read_body()
             try:
-                card = self.runtime.board().human_complete(
-                    str(data.get("card_id") or ""), data.get("if_version")
+                card = self.runtime.board().human_create(
+                    str(data.get("title") or ""),
+                    desc=str(data.get("desc") or ""),
+                    labels=data.get("labels"),
+                    priority=str(data.get("priority") or "normal"),
+                    role=str(data.get("role") or "") or None,
+                    checklist=data.get("checklist"),
                 )
             except PotError as exc:
                 self._send_json({"error": str(exc)}, status=400)
                 return
             self._send_json({"ok": True, "card": card})
-        elif url.path == "/board/reject":
+        elif url.path == "/board/reopen":
+            # 裁决 32: the human's board action — done → todo, reason in comments.
             data = self._read_body()
             try:
-                card = self.runtime.board().human_reject(
+                card = self.runtime.board().human_reopen(
                     str(data.get("card_id") or ""),
                     str(data.get("reason") or ""),
                     data.get("if_version"),
+                )
+            except PotError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"ok": True, "card": card})
+        elif url.path == "/board/delete":
+            data = self._read_body()
+            try:
+                card = self.runtime.board().human_delete(
+                    str(data.get("card_id") or ""), data.get("if_version")
                 )
             except PotError as exc:
                 self._send_json({"error": str(exc)}, status=400)
@@ -948,16 +986,20 @@ class YesSirHandler(BaseHTTPRequestHandler):
 _HOST: dict = {}
 
 
-def host_turn(session_id: str, user_msg: str | None) -> None:
+def host_turn(session_id: str, user_msg: str | None, *, internal: bool = False) -> None:
     """A turn with no HTTP client behind it (spec: role dispatch, job
     wakeups): the same core with a tape-only sink, so a page watching that
-    session reattaches through /events exactly like a live chat turn."""
+    session reattaches through /events exactly like a live chat turn.
+    `internal=True` marks the input as a host note (裁决 35: persisted with the
+    flag, never rendered — only the model reads it)."""
     runtime = _HOST.get("runtime") or WebUIRuntime()
-    _execute_turn(session_id, user_msg, sink=WebSink(None, session_id), runtime=runtime)
+    _execute_turn(
+        session_id, user_msg, sink=WebSink(None, session_id), runtime=runtime, internal=internal
+    )
 
 
 def deliver_card_block(session_id: str, cards: list[dict]) -> None:
-    """裁决 30: write the review card block straight into the dispatching
+    """裁决 30: write the completion card block straight into the dispatching
     conversation — no model turn, no internal note.
 
     The session lock serializes against chat turns: a turn holds it from load
@@ -965,7 +1007,7 @@ def deliver_card_block(session_id: str, cards: list[dict]) -> None:
     loaded earlier, and a queued write simply lands after the turn's reply.
     """
     lang = "en" if load_config().ui_lang == "en" else "zh"
-    block = dispatch.review_block(cards, lang)
+    block = dispatch.done_block(cards, lang)
     with _session_lock(session_id):
         data = session.load_session(session_id)
         if data is None:  # deleted since dispatch: nothing to tell
@@ -979,30 +1021,38 @@ def deliver_card_block(session_id: str, cards: list[dict]) -> None:
             data.get("subagents"),
             data.get("asks"),
         )
-    runlog.note("review: card block -> %s (%d card(s))", session_id, len(cards))
+    runlog.note("done: card block -> %s (%d card(s))", session_id, len(cards))
     note_alert(session_id, "card")
 
 
 def _after_turn(session_id: str, aborted: bool) -> None:
     """Post-turn hooks: deliver jobs that finished while this turn ran (spec
     §3.4 裁决 20 — 挂起补投), wake roles for claimable cards (M2b), and write
-    review card blocks into the conversations that dispatched them (裁决 30/31).
+    completion card blocks into the conversations that dispatched them (裁决 30/31).
     A stopped turn does none of it — stop means stop."""
     try:
-        # Snapshot first: a card that reaches review inside the flush or the
-        # dispatch cycle below counts as fresh for THIS hook.
-        before = dispatch.cards_in_review()
+        # Snapshot first: a card that reaches done or blocked inside the flush
+        # or the dispatch cycle below counts as fresh for THIS hook.
+        before_done = dispatch.cards_done()
+        before_blocked = dispatch.cards_blocked()
         pending = jobs.flush(session_id)
         if pending:
-            host_turn(session_id, "\n\n".join(jobs.report(j) for j in pending))
+            host_turn(session_id, "\n\n".join(jobs.report(j) for j in pending), internal=True)
         if aborted:
             return
         dispatch.dispatch_pending(host_turn)
-        fresh = dispatch.cards_in_review() - before
-        if fresh:
-            cards = [dispatch.board().get(cid) for cid in sorted(fresh)]
-            for target, routed in dispatch.review_route(cards).items():
+        fresh_done = dispatch.cards_done() - before_done
+        if fresh_done:
+            cards = [dispatch.board().get(cid) for cid in sorted(fresh_done)]
+            for target, routed in dispatch.notify_route(cards).items():
                 deliver_card_block(target, routed)
+        # 裁决 34: a card going blocked wakes its planner — internally (35).
+        fresh_blocked = dispatch.cards_blocked() - before_blocked
+        if fresh_blocked:
+            cards = [dispatch.board().get(cid) for cid in sorted(fresh_blocked)]
+            lang = "en" if load_config().ui_lang == "en" else "zh"
+            for target, routed in dispatch.notify_route(cards).items():
+                host_turn(target, dispatch.stuck_note(routed, lang), internal=True)
     except Exception as exc:
         runlog.problem("after-turn %s: %s", session_id, exc)
 
@@ -1014,6 +1064,7 @@ def _execute_turn(
     sink: WebSink,
     runtime: WebUIRuntime,
     messages=None,
+    internal: bool = False,
 ) -> None:
     """The turn core, shared by HTTP chat turns and host-driven turns:
     register /stop → queue behind the session lock → load → run → save →
@@ -1038,7 +1089,12 @@ def _execute_turn(
                 else:
                     messages = [{"role": "system", "content": runtime.new_session_prompt()}]
                 if user_msg is not None:
-                    messages.append({"role": "user", "content": user_msg})
+                    row: dict = {"role": "user", "content": user_msg}
+                    if internal:
+                        # 裁决 35: a host note the model must read but the
+                        # renderer must never show.
+                        row["internal"] = True
+                    messages.append(row)
             messages = repair_tool_gaps(messages)
 
             # Persist at turn start: the user message must be on disk while

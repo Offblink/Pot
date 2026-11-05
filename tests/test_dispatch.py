@@ -67,6 +67,43 @@ def test_eligible_mirrors_claim_gates():
 # ---- the walk ----
 
 
+def test_instances_are_numbered_and_reused(env):
+    """裁决 33: one instance = one numbered session; role_session = the first."""
+    role = env.roles.get("exec")
+    first = dispatch.role_session(role)
+    second = dispatch.ensure_instance(role)
+    assert second != first
+    assert int(session.load_session(first).get("instance") or 1) == 1
+    assert session.load_session(second)["instance"] == 2
+    assert [str(r["id"]) for r in dispatch.role_instances(role)] == [first, second]
+    assert dispatch.role_session(role) == first  # stable handle, no third mount
+
+
+def test_dispatch_grows_instances_up_to_max(env):
+    """裁决 33: full instances trigger growth until maxInstances, then wait."""
+    env.roles.create(
+        {"id": "bot", "name": "Bot", "canClaim": ["special"], "wip": 1, "maxInstances": 2},
+        "human",
+    )
+    for title in ("a", "b", "c"):
+        _card(env, title=title, labels=["special"])
+
+    calls: list[tuple[str, str]] = []
+
+    def claiming_wake(sid: str, msg: str) -> None:
+        calls.append((sid, msg))
+        card_id = msg.split(": ", 1)[1].split(" ", 1)[0]
+        card = env.board.get(card_id)
+        actor = Actor(session.load_session(sid)["role"], sid)
+        env.board.claim(actor, card["id"], card["ifVersion"])
+
+    assert dispatch.dispatch_pending(claiming_wake) == 2  # cap: 2 instances × wip 1
+    sids = {sid for sid, _ in calls}
+    assert len(sids) == 2
+    assert sorted(int(session.load_session(sid)["instance"]) for sid in sids) == [1, 2]
+    assert len(env.board.list(status="todo")) == 1  # the third card waits its turn
+
+
 def test_dispatch_runs_one_turn_in_the_matching_role_session(env):
     _card(env, title="code it", labels=["coding"])
     calls, run_turn = _recorder()
@@ -92,11 +129,16 @@ def test_card_specific_role_is_preferred(env):
     assert session.load_session(calls[0][0])["role"] == "coder2"
 
 
-def test_wip_full_role_is_skipped(env):
-    held = _card(env, title="already doing", labels=["coding"])
-    actor = Actor("exec", "other-session")
-    env.board.claim(actor, held["id"], held["ifVersion"])  # exec now holds 1/1
-    _card(env, title="second", labels=["coding"])
+def test_instances_at_cap_with_full_wip_are_skipped(env):
+    """裁决 33: growth has a ceiling — a capped, saturated role is skipped."""
+    env.roles.create(
+        {"id": "solo", "name": "Solo", "canClaim": ["solo-label"], "wip": 1, "maxInstances": 1},
+        "human",
+    )
+    sid = dispatch.ensure_instance(env.roles.get("solo"))
+    held = _card(env, title="already doing", labels=["solo-label"])
+    env.board.claim(Actor("solo", sid), held["id"], held["ifVersion"])  # 1/1, cap reached
+    _card(env, title="second", labels=["solo-label"])
     calls, run_turn = _recorder()
     assert dispatch.dispatch_pending(run_turn) == 0
     assert calls == []
@@ -118,16 +160,16 @@ def test_dispatch_is_a_no_op_on_an_empty_board(env):
 # ---- review notification (spec §3.3) ----
 
 
-def test_cards_in_review_tracks_the_column(env):
+def test_cards_done_tracks_completed(env):
     card = _card(env, title="wip", labels=["coding"])
     actor = Actor("exec", "s1")
     held = env.board.claim(actor, card["id"], card["ifVersion"])
-    env.board.move(actor, card["id"], "review", held["ifVersion"])
-    assert dispatch.cards_in_review() == {card["id"]}
-    assert dispatch.cards_in_review() - {card["id"]} == set()  # set semantics
+    env.board.report(actor, card["id"], "shipped", held["ifVersion"])
+    assert dispatch.cards_done() == {card["id"]}
+    assert dispatch.cards_done() - {card["id"]} == set()  # set semantics
 
 
-def test_review_route_gates_on_a_live_role_less_source(env):
+def test_done_route_gates_on_a_live_role_less_source(env):
     """裁决 31: only the conversation that dispatched the card gets it back."""
     env.roles.create(
         {"id": "chat", "name": "Chat", "canCreateCard": True, "canClaim": False}, "human"
@@ -135,7 +177,7 @@ def test_review_route_gates_on_a_live_role_less_source(env):
     session.save_session("chat-1", "chat", [{"role": "user", "content": "hi"}])
     exec_sid = dispatch.role_session(env.roles.get("exec"))  # a role session: never a target
 
-    routed = dispatch.review_route(
+    routed = dispatch.notify_route(
         [
             env.board.create(Actor("chat", "chat-1"), "real task"),
             env.board.create(Actor("chat", "gone"), "orphan"),  # source deleted
@@ -147,7 +189,7 @@ def test_review_route_gates_on_a_live_role_less_source(env):
     assert [c["title"] for c in routed["chat-1"]] == ["real task"]
 
 
-def test_review_block_is_the_report_without_the_chatter():
+def test_done_block_is_the_report_without_the_chatter():
     cards = [
         {
             "id": "p-1",
@@ -157,11 +199,11 @@ def test_review_block_is_the_report_without_the_chatter():
             "report": {"summary": "shipped it"},
         }
     ]
-    zh = dispatch.review_block(cards)
+    zh = dispatch.done_block(cards)
     assert "p-1" in zh and "the task" in zh and "shipped it" in zh and "urgent" in zh
     assert "[card review]" not in zh and "This note is for you" not in zh
-    en = dispatch.review_block(cards, lang="en")
-    assert "Card ready for review" in en and "shipped it" in en
+    en = dispatch.done_block(cards, lang="en")
+    assert "Card completed" in en and "shipped it" in en
 
 
 def test_create_stamps_the_dispatching_session_as_source(env):

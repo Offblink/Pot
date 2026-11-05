@@ -40,15 +40,16 @@ def test_full_lifecycle_through_tools(repo, board):
             card_id=card["id"], summary="完成", if_version=checked["card"]["ifVersion"]
         )
     )
-    assert rep["card"]["status"] == "review"
+    # 裁决 32: the report completes the card outright; holder stays on as the
+    # completion signature, the lease clears.
+    assert rep["card"]["status"] == "done"
+    assert rep["card"]["holder"] == "exec:s1"
+    assert rep["card"]["leaseUntil"] is None
 
     denied2 = t["pot_board_move"](
         card_id=card["id"], to="done", if_version=rep["card"]["ifVersion"]
     )
-    assert denied2.startswith("ERROR: human_only")
-
-    done = board.human_complete(card["id"], rep["card"]["ifVersion"])
-    assert done["status"] == "done"
+    assert denied2.startswith("ERROR: use_report")  # done only via report
 
 
 def test_release_returns_to_todo_with_reason(repo, board):

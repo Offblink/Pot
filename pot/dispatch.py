@@ -78,13 +78,24 @@ def reset_for_tests(*, roles: RoleRepo | None = None, board_obj: Board | None = 
         _SINGLETONS["board"] = board_obj
 
 
-def role_session(role: Role) -> str:
-    """The role's long-term session: found by its `role` key, created on first
-    wake (spec §3.1 — definition and memory live apart)."""
-    existing = [s for s in session.list_sessions() if s.get("role") == role.id]
-    if existing:
-        existing.sort(key=lambda s: str(s.get("updated") or ""), reverse=True)
-        return str(existing[0]["id"])
+def role_instances(role: Role) -> list[dict]:
+    """The role's mounted instance sessions, numbered (裁决 33).
+
+    One instance = one session carrying the role key; sessions written before
+    the `instance` field existed count as #1.
+    """
+    rows = [s for s in session.list_sessions() if s.get("role") == role.id]
+    rows.sort(key=lambda s: (int(s.get("instance") or 1), str(s.get("created") or "")))
+    return rows
+
+
+def ensure_instance(role: Role) -> str:
+    """Mount the next numbered instance of the role (auto-growth, 裁决 33).
+
+    Called under dispatch's cycle lock, so numbering cannot race itself.
+    """
+    rows = role_instances(role)
+    number = max((int(r.get("instance") or 1) for r in rows), default=0) + 1
     sid = session.new_session_id()
     # The turn runner rewrites the system row from the live role definition on
     # every turn (mission edits apply without re-mounting).
@@ -94,12 +105,23 @@ def role_session(role: Role) -> str:
         [{"role": "system", "content": ""}],
         role=role.id,
     )
-    runlog.note("mounted role session %s for role %s", sid, role.id)
+    session.set_key(sid, "instance", number)
+    runlog.note("mounted %s instance #%d (%s)", role.id, number, sid)
     return sid
 
 
-def eligible(role: Role, card: dict, held: int) -> bool:
-    """Mirror of board.claim's role gates (the claim itself re-checks)."""
+def role_session(role: Role) -> str:
+    """The role's first instance (created on first use) — the stable handle
+    tests and one-off callers expect (spec §3.1: definition and memory apart)."""
+    rows = role_instances(role)
+    if rows:
+        return str(rows[0]["id"])
+    return ensure_instance(role)
+
+
+def role_may_take(role: Role, card: dict) -> bool:
+    """Role-level claim gates (labels / canClaim / card.role). The WIP gate is
+    per instance and lives in `_held_by_instance` (裁决 33)."""
     if role.canClaim is False:
         return False
     if (
@@ -108,22 +130,26 @@ def eligible(role: Role, card: dict, held: int) -> bool:
         and not set(card.get("labels") or []) <= set(role.canClaim)
     ):
         return False
-    if card.get("role") and card["role"] != role.id:
-        return False
-    return held < role.wip
+    return not card.get("role") or card["role"] == role.id
 
 
-def _held_by(cards: list[dict], role_id: str) -> int:
-    prefix = f"{role_id}:"
-    return sum(
-        1
-        for c in cards
-        if c.get("holder") and str(c["holder"]).startswith(prefix) and c.get("status") != "done"
-    )
+def eligible(role: Role, card: dict, held: int) -> bool:
+    """Mirror of board.claim's role gates (the claim itself re-checks)."""
+    return role_may_take(role, card) and held < role.wip
 
 
-def _next_claimable(seen: set[str]) -> tuple[dict, Role] | None:
-    """First unvisited todo card some role may take; urgent cards first."""
+def _held_by_instance(cards: list[dict], role_id: str, session_id: str) -> int:
+    """Cards held by exactly this instance (裁决 33: wip counts per instance)."""
+    holder = f"{role_id}:{session_id}"
+    return sum(1 for c in cards if c.get("holder") == holder and c.get("status") != "done")
+
+
+def _next_claimable(seen: set[str]) -> tuple[dict, Role, str | None] | None:
+    """First unvisited todo card an instance may take; urgent cards first.
+
+    Returns (card, role, instance) — instance None means "no live instance has
+    a free slot and the role may still grow one" (裁决 33 auto-growth).
+    """
     b = board()
     repo = roles_repo()
     cards = b.list()
@@ -134,13 +160,19 @@ def _next_claimable(seen: set[str]) -> tuple[dict, Role] | None:
         key=lambda c: (order.get(c.get("priority"), 1), c.get("createdAt") or 0),
     )
     for card in todos:
-        held = {r.id: _held_by(cards, r.id) for r in roles}
-        for role in roles:  # card-specified role first: it is the intended owner
-            if card.get("role") == role.id and eligible(role, card, held[role.id]):
-                return card, role
-        for role in roles:
-            if card.get("role") != role.id and eligible(role, card, held[role.id]):
-                return card, role
+        ordered = [r for r in roles if card.get("role") == r.id] + [
+            r for r in roles if card.get("role") != r.id
+        ]
+        for role in ordered:
+            if not role_may_take(role, card):
+                continue
+            rows = role_instances(role)
+            for row in rows:
+                sid = str(row["id"])
+                if _held_by_instance(cards, role.id, sid) < role.wip:
+                    return card, role, sid
+            if len(rows) < max(1, role.maxInstances):
+                return card, role, None  # grow: mount the next numbered instance
     return None
 
 
@@ -171,10 +203,10 @@ def dispatch_pending(run_turn) -> int:
             found = _next_claimable(seen)
             if found is None:
                 break
-            card, role = found
+            card, role, instance = found
             seen.add(card["id"])
             try:
-                sid = role_session(role)
+                sid = instance if instance is not None else ensure_instance(role)
                 run_turn(sid, card_brief(card))
                 ran += 1
             except Exception as exc:  # one broken session must not stall the board
@@ -184,21 +216,25 @@ def dispatch_pending(run_turn) -> int:
         _CYCLE.release()
 
 
-# ---- review notification (spec §3.3 / 裁决 30-31) ----
+# ---- completion notification (spec §3.3 / 裁决 30-32) ----
 
 
-def cards_in_review() -> set[str]:
-    return {str(c["id"]) for c in board().list(status="review")}
+def cards_done() -> set[str]:
+    return {str(c["id"]) for c in board().list(status="done")}
 
 
-def review_route(cards: list[dict]) -> dict[str, list[dict]]:
+def cards_blocked() -> set[str]:
+    return {str(c["id"]) for c in board().list(status="blocked")}
+
+
+def notify_route(cards: list[dict]) -> dict[str, list[dict]]:
     """Cards to the conversation that dispatched them — and only that one.
 
     裁决 31: a card created inside a conversation carries `source` = that
     session, and it is notified only while the session still exists and is a
     human conversation (no `role` key). Cards with no source (human/seed) and
     cards sourced to a role session stay off chat entirely — the board already
-    shows their review state.
+    shows their state.
     """
     buckets: dict[str, list[dict]] = {}
     for card in cards:
@@ -212,7 +248,7 @@ def review_route(cards: list[dict]) -> dict[str, list[dict]]:
     return buckets
 
 
-def review_block(cards: list[dict], lang: str = "zh") -> str:
+def done_block(cards: list[dict], lang: str = "zh") -> str:
     """裁决 30: the report as one host-rendered card block.
 
     No model turn and no internal-note wording: the executor already wrote the
@@ -221,9 +257,9 @@ def review_block(cards: list[dict], lang: str = "zh") -> str:
     """
     zh = lang != "en"
     head = (
-        "📋 **卡片待验收** —— 报告已到，去看板验收（✓ 完成 / ✗ 退回）"
+        "📋 **卡片已完成** —— 报告已到（要重做就去看板重开）"
         if zh
-        else "📋 **Card ready for review** — the report is in; accept or reject it on the board"
+        else "📋 **Card completed** — the report is in (reopen it on the board to redo)"
     )
     parts = [head]
     for card in cards:
@@ -238,3 +274,28 @@ def review_block(cards: list[dict], lang: str = "zh") -> str:
         )
         parts.append(f"**`{card.get('id')}` · {card.get('title')}**\n{facts}\n\n{summary}")
     return "\n\n".join(parts)
+
+
+def stuck_note(cards: list[dict], lang: str = "zh") -> str:
+    """裁决 34: the planner's wake for blocked cards — an INTERNAL message
+    (裁决 35: persisted with the flag, never rendered; the model decides
+    whether to say anything, defaulting to `<<SILENT>>`)."""
+    zh = lang != "en"
+    lines = []
+    for card in cards:
+        holder = str(card.get("holder") or "")
+        who = holder.split(":", 1)[0] + ("#" + holder.split(":", 1)[1][:4] if ":" in holder else "")
+        lines.append(f'- {card.get("id")} "{card.get("title")}" (holder: {who or "?"})')
+    if zh:
+        return (
+            "[board] 卡片进受阻（内部消息，用户看不到）：\n"
+            + "\n".join(lines)
+            + "\n你是 Planner：用 pot_board_reassign 换角色退回 todo 或解阻（reason 必填）；"
+            "若它会自愈，直接回复 <<SILENT>>。"
+        )
+    return (
+        "[board] Cards went blocked (internal note, the user never sees it):\n"
+        + "\n".join(lines)
+        + "\nYou are the Planner: use pot_board_reassign to change role / send back"
+        " to todo (reason required), or reply <<SILENT>> if it resolves itself."
+    )

@@ -1,6 +1,6 @@
-"""Human board routes (spec §3.5): GET /board, /board/complete, /board/reject,
-plus the new /jobs and re-armed /background-tool shapes. Loopback server, no
-network beyond 127.0.0.1."""
+"""Human board routes (spec §3.5 / 裁决 32/37): GET /board, /board/create,
+/board/reopen, /board/delete, plus the /jobs and re-armed /background-tool
+shapes. Loopback server, no network beyond 127.0.0.1."""
 
 from __future__ import annotations
 
@@ -12,13 +12,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from pot import session as session_mod
 from pot.board import Board
 from pot.roles import Actor, RoleRepo
 from pot.server import WebUIRuntime, make_webui_server
 
 
 @pytest.fixture()
-def host(tmp_path):
+def host(tmp_path, monkeypatch):
+    # The instances feed reads role sessions; keep them in tmp like everything
+    # else in this file (裁决 33/36).
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path / "sessions")
     roles = RoleRepo(tmp_path / "roles")
     roles.create({"id": "exec", "name": "执行者"}, "human")
     # The system Planner role the default repo seeds (dispatch.roles_repo);
@@ -52,12 +56,12 @@ def _json(method: str, path: str, obj: dict | None = None, base: str = "") -> tu
         return exc.code, json.loads(exc.read())
 
 
-def _review_card(host) -> dict:
-    """A card pushed to review through the real agent-side gates."""
+def _done_card(host) -> dict:
+    """A completed card through the real agent-side gates (report → done)."""
     card = host.board.human_create("ship it", labels=["coding"])
     actor = Actor("exec", "s1")
     held = host.board.claim(actor, card["id"], card["ifVersion"])
-    return host.board.move(actor, card["id"], "review", held["ifVersion"])
+    return host.board.report(actor, card["id"], "shipped", held["ifVersion"])
 
 
 def test_board_route_lists_cards_and_roles(host):
@@ -70,44 +74,27 @@ def test_board_route_lists_cards_and_roles(host):
     assert any(r["id"] == "planner" for r in body["roles"])  # system seed
 
 
-def test_complete_is_human_only_through_review(host):
-    card = _review_card(host)
+def test_create_and_delete_routes(host):
+    status, body = _json(
+        "POST", "/board/create", {"title": "via web", "labels": ["coding"]}, host.base
+    )
+    assert status == 200 and body["card"]["status"] == "todo"
+    card = body["card"]
     status, body = _json(
         "POST",
-        "/board/complete",
+        "/board/delete",
         {"card_id": card["id"], "if_version": card["ifVersion"]},
         host.base,
     )
-    assert status == 200 and body["ok"]
-    assert host.board.get(card["id"])["status"] == "done"
+    assert status == 200 and body["card"]["deleted"] is True
 
 
-def test_complete_rejects_a_stale_version(host):
-    card = _review_card(host)
-    status, body = _json(
-        "POST", "/board/complete", {"card_id": card["id"], "if_version": 999}, host.base
-    )
-    assert status == 400 and "error" in body
-    assert host.board.get(card["id"])["status"] == "review"  # untouched
-
-
-def test_complete_refuses_a_card_not_in_review(host):
-    card = host.board.human_create("still todo")
-    status, _body = _json(
-        "POST",
-        "/board/complete",
-        {"card_id": card["id"], "if_version": card["ifVersion"]},
-        host.base,
-    )
-    assert status == 400
-    assert host.board.get(card["id"])["status"] == "todo"
-
-
-def test_reject_returns_to_todo_with_the_reason_in_comments(host):
-    card = _review_card(host)
+def test_reopen_flips_done_back_to_todo(host):
+    card = _done_card(host)
+    assert card["status"] == "done" and card["holder"] == "exec:s1"  # signature kept
     status, body = _json(
         "POST",
-        "/board/reject",
+        "/board/reopen",
         {"card_id": card["id"], "if_version": card["ifVersion"], "reason": "needs tests"},
         host.base,
     )
@@ -118,16 +105,70 @@ def test_reject_returns_to_todo_with_the_reason_in_comments(host):
     assert any(c["by"] == "human" and c["text"] == "needs tests" for c in stored["comments"])
 
 
-def test_reject_needs_a_reason(host):
-    card = _review_card(host)
+def test_reopen_rejects_a_stale_version(host):
+    card = _done_card(host)
+    status, body = _json(
+        "POST",
+        "/board/reopen",
+        {"card_id": card["id"], "if_version": 999, "reason": "x"},
+        host.base,
+    )
+    assert status == 400 and "error" in body
+    assert host.board.get(card["id"])["status"] == "done"  # untouched
+
+
+def test_reopen_refuses_a_card_not_done(host):
+    card = host.board.human_create("still todo")
     status, _body = _json(
         "POST",
-        "/board/reject",
+        "/board/reopen",
+        {"card_id": card["id"], "if_version": card["ifVersion"], "reason": "x"},
+        host.base,
+    )
+    assert status == 400
+    assert host.board.get(card["id"])["status"] == "todo"
+
+
+def test_reopen_needs_a_reason(host):
+    card = _done_card(host)
+    status, _body = _json(
+        "POST",
+        "/board/reopen",
         {"card_id": card["id"], "if_version": card["ifVersion"], "reason": "  "},
         host.base,
     )
     assert status == 400
-    assert host.board.get(card["id"])["status"] == "review"
+    assert host.board.get(card["id"])["status"] == "done"
+
+
+def test_board_route_reports_instances(host):
+    """裁决 33/36: the scene feed carries every mounted instance with its state."""
+    session_mod.save_session("exec-1", "执行者", [{"role": "system", "content": ""}], role="exec")
+    session_mod.set_key("exec-1", "instance", 1)
+    card = host.board.human_create("wip", labels=["coding"])
+    actor = Actor("exec", "exec-1")
+    held = host.board.claim(actor, card["id"], card["ifVersion"])
+
+    status, body = _json("GET", "/board", base=host.base)
+    assert status == 200
+    inst = next(i for i in body["instances"] if i["session"] == "exec-1")
+    assert inst == {
+        "role": "exec",
+        "session": "exec-1",
+        "number": 1,
+        "status": "working",
+        "cards": [card["id"]],
+    }
+
+    host.board.move(actor, card["id"], "blocked", held["ifVersion"])
+    status, body = _json("GET", "/board", base=host.base)
+    stuck = next(i for i in body["instances"] if i["session"] == "exec-1")
+    assert stuck["status"] == "stuck"  # the red square's data source
+
+    # conversations never appear as agents (裁决 29)
+    session_mod.save_session("chat-1", "chat", [{"role": "user", "content": "hi"}])
+    status, body = _json("GET", "/board", base=host.base)
+    assert all(i["session"] != "chat-1" for i in body["instances"])
 
 
 def test_jobs_route_answers_empty_without_a_turn(host):

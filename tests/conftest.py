@@ -135,6 +135,15 @@ class WebUIHost:
             mp.setattr(session_mod, "SESSIONS_DIR", Path(session_dir))
         if llm is not None:
             mp.setattr(Agent, "_default_llm", llm)
+        # Any turn schedules _after_turn on a daemon thread; after stop() undoes
+        # the patches it would walk the REAL board and write brief-only junk
+        # sessions into data/sessions (observed leak, 2026-11-05). These hosts
+        # test the WebUI, not dispatch.
+        from pot import dispatch as dispatch_mod
+        from pot import jobs as jobs_mod
+
+        mp.setattr(dispatch_mod, "dispatch_pending", lambda run: 0)
+        mp.setattr(jobs_mod, "flush", lambda sid: [])
         runtime = WebUIRuntime()
         return cls(make_webui_server(0, runtime), runtime, mp)
 
