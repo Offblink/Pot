@@ -1424,14 +1424,15 @@ function sceneRenderBays() {
   const floor = sceneEl('scene-floor');
   const cx = floor.clientWidth / 2;
   const cy = floor.clientHeight / 2;
-  const radius = Math.max(300, Math.min(floor.clientWidth, floor.clientHeight) * 0.4);
-  const links = [];
+  // 椭圆布点（2026-11-06 用户报「太窄没显示」）：半径只按短边算时，左右工位
+  // 与 440px 任务板之间只剩 30px 缝——虚线整段被两张卡盖住。横向按宽度铺开
+  // （留出工位半宽 88 + 边距 24），纵向仍贴高度。
+  const rx = Math.min(floor.clientWidth * 0.42, floor.clientWidth / 2 - 112);
+  const ry = Math.min(floor.clientHeight * 0.42, floor.clientHeight / 2 - 58);
   wrap.innerHTML = busyBays.map((x, i) => {
     const angle = -Math.PI / 2 + (n === 1 ? 0 : (i * 2 * Math.PI) / n);
-    const px = Math.round(cx + radius * Math.cos(angle));
-    const py = Math.round(cy + radius * Math.sin(angle));
-    // 宣传片同款 feed line: bay → board; red only when every instance there is stuck
-    links.push({ px, py, stuck: !x.busy.some(s => s.status !== 'stuck') });
+    const px = Math.round(cx + rx * Math.cos(angle));
+    const py = Math.round(cy + ry * Math.sin(angle));
     const squares = x.busy.map(s =>
       `<button class="scene-agent${s.status === 'stuck' ? ' stuck' : ''}" data-sid="${escapeHtml(s.session)}"` +
       ` title="${escapeHtml(x.r.name || x.r.id)}#${s.number} · ${s.status === 'stuck' ? T('scene.stuck') : T('scene.working')}"></button>`
@@ -1440,6 +1441,17 @@ function sceneRenderBays() {
       `<div class="scene-bay-label">${escapeHtml(x.r.name || x.r.id)}</div>` +
       `<div class="scene-squares">${squares}</div></div>`;
   }).join('');
+  // 一个 agent 一条线（2026-11-06 用户定）：起点取方块的真实渲染位置，
+  // 受阻方块自带 .stuck → 红线无点。
+  const fr = floor.getBoundingClientRect();
+  const links = [...wrap.querySelectorAll('.scene-agent')].map(el => {
+    const r = el.getBoundingClientRect();
+    return {
+      px: Math.round(r.left - fr.left + r.width / 2),
+      py: Math.round(r.top - fr.top + r.height / 2),
+      stuck: el.classList.contains('stuck'),
+    };
+  });
   sceneRenderLinks(links, cx, cy);
 }
 

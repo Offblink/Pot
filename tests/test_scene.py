@@ -160,22 +160,23 @@ def test_picking_the_open_session_leaves_the_scene_too(page, room):
 
 
 def test_scene_draws_feed_lines_from_bays_to_the_board(page, room):
-    """宣传片同款（2026-11-06 用户点名）：每个工位一条虚线插进任务板，
-    干活的工位上有源源不断流向任务板的圆点。"""
+    """宣传片同款（2026-11-06 用户点名）：每个 agent 方块一条虚线插进任务板，
+    干活的方块上有源源不断流向任务板的圆点；左右工位与板之间要留出可见缝。"""
     page.click("#btn-scene")
     # attached, not visible: a vertical line has a zero-width box, which
     # Playwright counts as hidden even though the geometry is correct
     page.wait_for_selector("#scene-links line", state="attached")
-    assert page.locator("#scene-links line").count() == page.locator(".scene-bay").count()
+    # one line per AGENT (square), not per bay — 用户定的形态
+    assert page.locator("#scene-links line").count() == page.locator(".scene-agent").count()
 
     floor = page.locator("#scene-floor").bounding_box()
-    bay = page.locator(".scene-bay").first.bounding_box()
+    agent = page.locator(".scene-agent").first.bounding_box()
     line = page.locator("#scene-links line").first
     x1, y1 = float(line.get_attribute("x1")), float(line.get_attribute("y1"))
     x2, y2 = float(line.get_attribute("x2")), float(line.get_attribute("y2"))
-    # starts at the bay's centre ...
-    assert abs(x1 - (bay["x"] - floor["x"] + bay["width"] / 2)) < 3
-    assert abs(y1 - (bay["y"] - floor["y"] + bay["height"] / 2)) < 3
+    # starts at the agent square's centre ...
+    assert abs(x1 - (agent["x"] - floor["x"] + agent["width"] / 2)) < 3
+    assert abs(y1 - (agent["y"] - floor["y"] + agent["height"] / 2)) < 3
     # ... and runs to the floor centre, where the opaque board card covers the tail
     assert abs(x2 - floor["width"] / 2) < 3 and abs(y2 - floor["height"] / 2) < 3
 
