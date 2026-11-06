@@ -183,3 +183,47 @@ def test_scene_draws_feed_lines_from_bays_to_the_board(page, room):
     # the working exec keeps feeding the board: dots ride the line (SMIL motion)
     assert page.locator("#scene-links .scene-flow").count() >= 1
     assert page.locator("#scene-links animateMotion").count() >= 1
+
+
+def test_bulk_delete_removes_only_the_selected_cards(page, room):
+    """批量删除（2026-11-06 用户点名）：☑ 进选择态 → 点行勾选 → 确认 → 只删所选。"""
+    board = room[2]
+    extra = [board.human_create(f"bulk-{i}", labels=["coding"]) for i in range(3)]
+
+    page.click("#btn-scene")
+    page.wait_for_selector(".scene-card")
+    page.click("#scene-select")
+    assert not page.locator("#bulk-del").is_enabled()  # nothing picked yet
+
+    page.locator(".scene-card", has_text="bulk-0").click()
+    page.locator(".scene-card", has_text="bulk-1").click()
+    assert page.locator("#scene-bulk").is_visible()
+    assert "(2)" in page.locator("#bulk-del").text_content()
+    assert page.locator(".scene-card.sel").count() == 2
+
+    page.click("#bulk-del")
+    page.click("#confirm-ok")
+    assert _wait(lambda: all(board.get(c["id"])["deleted"] for c in extra[:2]), 10)
+    assert not board.get(extra[2]["id"])["deleted"]  # unselected survivor
+    page.wait_for_selector("#scene-bulk.hidden", state="attached")  # mode exits on success
+
+
+def test_empty_hint_never_sits_under_a_full_board(page, room):
+    """空态提示（没有正在工作的 agent）不能被任务板遮挡——任务多、板顶到 56vh 上限时
+    提示必须仍在板上方（2026-11-06 用户报；回归：旧 top:24% 落在板带 22%–78% 里）。"""
+    board = room[2]
+    for i in range(40):
+        board.human_create(f"堆叠任务-{i:02d}", labels=["coding"])
+    page.click("#btn-scene")
+    page.wait_for_selector(".scene-card")
+
+    geo = page.evaluate("""() => {
+      sceneData.instances = [];   // no busy agents → the empty hint renders
+      sceneRender();
+      const e = document.querySelector('.scene-empty').getBoundingClientRect();
+      const c = document.getElementById('scene-center').getBoundingClientRect();
+      return { emptyBottom: e.bottom, emptyWidth: e.width, centerTop: c.top, centerHeight: c.height };
+    }""")
+    assert geo["emptyWidth"] > 0  # the hint actually rendered
+    assert geo["centerHeight"] > 400  # the board really grew tall (many cards)
+    assert geo["emptyBottom"] <= geo["centerTop"]  # …and still cannot cover the hint

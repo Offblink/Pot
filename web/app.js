@@ -1364,6 +1364,10 @@ Alerts.start();
    cards, so concurrent conversations aggregate here (全会话统计). */
 let sceneData = { cards: [], roles: [], instances: [] };
 let sceneTimer = null;
+/* 批量删除（2026-11-06）：选择态独立于渲染 —— scenePoll 每 2s 重画列表，
+   勾选集合必须活在渲染之外才不会被刷掉。 */
+let sceneSelectMode = false;
+const sceneSelected = new Set();
 
 function sceneEl(id) { return document.getElementById(id); }
 function sceneIsOpen() { const o = sceneEl('scene-overlay'); return !!o && !o.classList.contains('hidden'); }
@@ -1490,11 +1494,69 @@ function sceneRenderCenter() {
       : done || c.status === 'doing' ? sceneInstLabel(c.holder)
       : (c.role || '');
     const metaCls = c.status === 'blocked' ? ' stuck' : '';
-    return `<div class="scene-card${done ? ' done' : ''}" data-card="${escapeHtml(c.id)}">` +
+    const sel = sceneSelected.has(c.id);
+    return `<div class="scene-card${done ? ' done' : ''}${sel ? ' sel' : ''}" data-card="${escapeHtml(c.id)}">` +
+      (sceneSelectMode ? `<input type="checkbox" class="scene-check"${sel ? ' checked' : ''} tabindex="-1">` : '') +
       `<span class="scene-dot ${escapeHtml(c.priority || 'normal')}"></span>` +
       `<span class="scene-card-title">${escapeHtml(c.title)}</span>` +
       `<span class="scene-card-meta${metaCls}">${escapeHtml(meta)}</span></div>`;
   }).join('') || `<div class="scene-none">${T('scene.none')}</div>`;
+  sceneBulkUi();
+}
+
+/* ---- 批量删除：☑ 进入选择态 → 点行勾选 → 删除所选（复用 /board/delete） ---- */
+function sceneBulkUi() {
+  const bar = sceneEl('scene-bulk');
+  if (!bar) return;
+  bar.classList.toggle('hidden', !sceneSelectMode);
+  const btn = sceneEl('scene-select');
+  btn.classList.toggle('on', sceneSelectMode);
+  btn.setAttribute('aria-pressed', String(sceneSelectMode));
+  const del = sceneEl('bulk-del');
+  del.textContent = `${T('scene.bulkDelete')} (${sceneSelected.size})`;
+  del.disabled = sceneSelected.size === 0;
+}
+
+function sceneToggleSelect() {
+  sceneSelectMode = !sceneSelectMode;
+  if (!sceneSelectMode) sceneSelected.clear();
+  sceneEl('bulk-note').textContent = '';
+  sceneRenderCenter();
+}
+
+function sceneBulkCancel() {
+  sceneSelectMode = false;
+  sceneSelected.clear();
+  sceneEl('bulk-note').textContent = '';
+  sceneRenderCenter();
+}
+
+async function sceneBulkDelete() {
+  const ids = [...sceneSelected];
+  if (!ids.length) return;
+  showConfirm({
+    title: T('scene.bulkDelete'),
+    message: `${T('scene.confirmBulkDelete')} (${ids.length})`,
+    danger: true,
+    onConfirm: async () => {
+      const failed = [];
+      for (const id of ids) {
+        const c = sceneCard(id);
+        try {
+          if (!c) throw new Error(id);
+          await scenePost('/board/delete', { card_id: id, if_version: c.ifVersion });
+        } catch (e) { failed.push(id); }
+      }
+      // 全清 → 退出选择态；有失败 → 留在选择态、只保留失败项供重试
+      sceneSelected.clear();
+      failed.forEach(id => sceneSelected.add(id));
+      if (!failed.length) sceneSelectMode = false;
+      sceneEl('bulk-note').textContent = failed.length
+        ? `${T('scene.bulkFailed')}: ${failed.length}` : '';
+      sceneRenderCenter();
+      scenePoll();
+    },
+  });
 }
 
 /* ---- detail (裁决 36: list rows open it; 重开/删除 live here) ---- */
@@ -1665,13 +1727,24 @@ document.getElementById('btn-scene').addEventListener('click', () => {
   if (sceneIsOpen()) sceneClose(); else sceneOpen();
 });
 sceneEl('scene-add').addEventListener('click', () => sceneOpenCreate());
+sceneEl('scene-select').addEventListener('click', sceneToggleSelect);
+sceneEl('bulk-cancel').addEventListener('click', sceneBulkCancel);
+sceneEl('bulk-del').addEventListener('click', sceneBulkDelete);
 sceneEl('scene-bays').addEventListener('click', e => {
   const sq = e.target.closest('.scene-agent');
   if (sq) sceneShowAgent(sq.dataset.sid);
 });
 sceneEl('scene-list').addEventListener('click', e => {
   const row = e.target.closest('.scene-card[data-card]');
-  if (row) sceneShowDetail(row.dataset.card);
+  if (!row) return;
+  if (sceneSelectMode) {
+    const id = row.dataset.card;
+    if (sceneSelected.has(id)) sceneSelected.delete(id);
+    else sceneSelected.add(id);
+    sceneRenderCenter();
+    return;
+  }
+  sceneShowDetail(row.dataset.card);
 });
 sceneEl('sa-cards').addEventListener('click', e => {
   const row = e.target.closest('.scene-row[data-card]');
@@ -1685,6 +1758,7 @@ window.addEventListener('resize', () => { if (sceneIsOpen()) sceneRender(); });
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape' || !sceneIsOpen()) return;
   if (document.getElementById('confirm-overlay').classList.contains('show')) return;
+  if (sceneSelectMode) { sceneBulkCancel(); return; }  // Esc leaves selection first
   const openModal = ['scene-agent-modal', 'scene-detail-modal', 'scene-todo-modal']
     .map(sceneEl).find(m => !m.classList.contains('hidden'));
   if (openModal) { openModal.classList.add('hidden'); return; }

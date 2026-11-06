@@ -54,8 +54,9 @@
       <svg id="scene-links" aria-hidden="true"></svg>
       <div id="scene-bays"></div>
       <div id="scene-center">
-        <div id="scene-center-head"><span data-i18n="scene.center">任务板</span><span id="scene-center-count">0</span><button id="scene-add" type="button" data-i18n-title="scene.add" title="新建卡片">＋</button></div>
+        <div id="scene-center-head"><span data-i18n="scene.center">任务板</span><span id="scene-center-count">0</span><span class="scene-head-tools"><button id="scene-select" type="button" data-i18n-title="scene.select" title="批量选择" aria-pressed="false">☑</button><button id="scene-add" type="button" data-i18n-title="scene.add" title="新建卡片">＋</button></span></div>
         <div id="scene-list"></div>
+        <div id="scene-bulk" class="hidden"><span id="bulk-note" class="scene-none"></span><button id="bulk-cancel" class="scene-act" type="button" data-i18n="scene.close">关闭</button><button id="bulk-del" class="scene-act danger" type="button" data-i18n="scene.bulkDelete" disabled>删除所选</button></div>
       </div>
     </div>
   </div>
