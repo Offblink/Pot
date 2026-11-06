@@ -15,7 +15,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__POT_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__POT_WEB_VER = 'web-scroll-policy';
+  window.__POT_WEB_VER = 'web-per-agent-lines';
   try { console.info('[pot-web]', window.__POT_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
