@@ -46,6 +46,7 @@ fun SettingsPage(
     var apiKey by remember { mutableStateOf("") }
     var endpoint by remember { mutableStateOf("") }
     var modelOpen by remember { mutableStateOf(false) }
+    var newModel by remember { mutableStateOf("") }
 
     LaunchedEffect(host.status) {
         if (host.status == HostStatus.RUNNING) state.loadModel()
@@ -175,12 +176,34 @@ fun SettingsPage(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    Spacer(Modifier.height(8.dp))
+                    // 添加模型名（2026-11-06 用户「设置页也做一个添加模型」）：saveModel
+                    // 的第三个参数早就通到 /configure（新增并切换），UI 一直传 null。
+                    OutlinedTextField(
+                        newModel,
+                        { newModel = it },
+                        label = {
+                            Text(
+                                Strings.t(
+                                    "添加模型名（留空=不改，填了即新增并切换）",
+                                    "Add model name (blank = unchanged, fills & switches)",
+                                ),
+                            )
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                     Spacer(Modifier.height(10.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
                             onClick = {
-                                state.saveModel(apiKey.ifBlank { null }, endpoint.ifBlank { null }, null)
+                                state.saveModel(
+                                    apiKey.ifBlank { null },
+                                    endpoint.ifBlank { null },
+                                    newModel.ifBlank { null },
+                                )
                                 apiKey = ""
+                                newModel = ""
                             },
                         ) { Text(Strings.t("保存模型配置", "Save model config")) }
                         OutlinedButton(onClick = { state.loadModel() }) {
