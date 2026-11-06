@@ -19,8 +19,11 @@ def test_gate_role_match(repo, board):
     repo.create({"id": "coder", "canClaim": ["coding"]}, creator="human")
     repo.create({"id": "planner", "canClaim": False, "canCreateCard": True}, creator="human")
 
-    # (a) labels 不在 canClaim 里
+    # (a) labels 不在 canClaim 里 —— 裁决 42 把这种卡拒在创建之前，claim 侧
+    #     的同名闸只剩「事后漂移」一种进入方式：卡建好后角色表被人改掉。
+    repo.create({"id": "ui", "canClaim": ["ui"]}, creator="human")
     a = _card(board, title="a", labels=["ui"])
+    repo.update("ui", {"canClaim": ["docs"]}, creator="human")
     with pytest.raises(PotError, match="role_mismatch"):
         board.claim(Actor("exec", "s1"), a["id"], a["ifVersion"])
 
@@ -38,6 +41,44 @@ def test_gate_role_match(repo, board):
     ok = board.claim(Actor("exec", "s1"), c["id"], c["ifVersion"])
     assert ok["holder"] == "exec:s1"
     assert ok["ifVersion"] == c["ifVersion"] + 1
+
+
+def test_gate_create_rejects_labels_no_role_covers(repo, board):
+    """裁决 42：建卡即验 —— 没有任何角色可领的 labels 拒绝落板，错误带词表。
+
+    2026-11-06 planner 死卡事故：labels video/design/capture 无角色可领，
+    建卡 ok:true、派工静默跳过、todo 进不了 blocked → stuck_note 永不触发，
+    用户说「到现在无人认领」才暴露。
+    """
+    repo.create({"id": "exec", "canClaim": ["coding"]}, creator="human")
+    repo.create({"id": "writer", "canClaim": ["docs"]}, creator="human")
+
+    # (a) 自造标签当场拒，错误里带现词表（发卡方一次改对）
+    with pytest.raises(PotError, match="role_mismatch") as exc:
+        board.human_create("死卡", labels=["video"])
+    assert "coding" in str(exc.value) and "docs" in str(exc.value)
+
+    # (b) 子集必须整体落在同一个角色里——跨角色拼出来的照样没人能领
+    with pytest.raises(PotError, match="role_mismatch"):
+        board.human_create("拼标签", labels=["coding", "docs"])
+
+    # (c) 钉了 role 只算被钉角色：exec 能领 coding，但卡钉给 writer 就是死卡
+    with pytest.raises(PotError, match="role_mismatch"):
+        board.human_create("钉死", labels=["coding"], role="writer")
+
+    # (d) 有角色整体覆盖 → 放行；无标签 → 放行（子集闸的宽松面不变）
+    assert board.human_create("ok", labels=["docs"])["id"]
+    assert board.human_create("any")["id"]
+
+
+def test_gate_create_holds_the_planner_path_to_the_same_rule(repo, board):
+    """裁决 42 同样管 Board.create（planner 发卡路径）——事故正是从这条路进来的。"""
+    repo.create({"id": "planner", "canClaim": False, "canCreateCard": True}, creator="human")
+    repo.create({"id": "exec", "canClaim": ["coding"]}, creator="human")
+
+    with pytest.raises(PotError, match="role_mismatch"):
+        board.create(Actor("planner", "chat-1"), "bad", labels=["video"])
+    assert board.create(Actor("planner", "chat-1"), "good", labels=["coding"])["id"]
 
 
 def test_gate_wip(repo, board):

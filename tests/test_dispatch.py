@@ -138,7 +138,10 @@ def test_dispatch_runs_one_turn_in_the_matching_role_session(env):
 
 
 def test_dispatch_skips_cards_no_role_may_take(env):
+    """裁决 42 后这种卡拒在创建前；walk 仍要跳过漂移进来的存量死卡。"""
+    env.roles.create({"id": "temp", "name": "T", "canClaim": ["unclaimable"]}, "human")
     _card(env, title="nobody's", labels=["unclaimable"])
+    env.roles.update("temp", {"canClaim": ["other"]}, "human")  # 建卡后人改 canClaim
     calls, run_turn = _recorder()
     assert dispatch.dispatch_pending(run_turn) == 0
     assert calls == []

@@ -97,6 +97,7 @@ def test_create_requires_cancreatecard(repo, board):
 
 def test_list_filters(repo, board):
     repo.create({"id": "exec", "canClaim": ["coding"], "canCreateCard": True}, creator="human")
+    repo.create({"id": "ui", "canClaim": ["ui"]}, creator="human")  # 裁决 42: 覆盖 ui 标签
     t = make_tools(board, Actor("exec", "s1"))
     json.loads(t["pot_board_create"](title="a", labels=["coding"]))
     json.loads(t["pot_board_create"](title="b", labels=["ui"]))

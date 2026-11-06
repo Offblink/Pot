@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from pot.errors import PotError
-from pot.roles import Actor, RoleRepo
+from pot.roles import Actor, Role, RoleRepo
 
 STATUSES = ("todo", "doing", "done", "blocked")  # backlog/review 退役（裁决 32）
 _PRIORITIES = ("urgent", "normal", "low")
@@ -217,6 +217,7 @@ class Board:
         label_list = _str_list(labels, "labels")
         if role is not None:
             self.roles.get(str(role))  # must exist → no_such_role
+        self._require_claimable(label_list, None if role is None else str(role))
         items = []
         for entry in _str_list(checklist, "checklist"):
             if not entry.strip():
@@ -285,6 +286,42 @@ class Board:
         return out
 
     # -- agent path (pot_board_*) -----------------------------------------
+
+    def _require_claimable(self, labels: list[str], role: str | None) -> None:
+        """创建闸（裁决 42）：没有任何角色能领的 labels 不许落板。
+
+        死卡的三重静默（2026-11-06 planner 事故，labels video/design/capture）：
+        建卡不验 → 派工 eligible() 静默跳过 → todo 永远到不了 blocked，
+        stuck_note（裁决 34）永不触发——全链路零信号，只能靠人眼发现。
+        与 claim 的角色匹配闸同口径：认领要求 labels ⊆ 某个角色的 canClaim
+        （钉了 role 就只算被钉角色），创建时找不到这样的角色即拒，错误携带
+        现词表，发卡方一次改对。claim 侧的同名闸保留——建卡后人改 canClaim
+        造成的存量漂移仍由它兜。
+        """
+        want = set(labels)
+        if not want:
+            return  # 无标签卡是任何列表的子集，任何未封禁角色都能认领
+        pool = [self.roles.get(str(role))] if role is not None else self.roles.list()
+
+        def takes(candidate: Role) -> bool:
+            if candidate.canClaim is False:
+                return False
+            return not (
+                isinstance(candidate.canClaim, list)
+                and candidate.canClaim
+                and not want <= set(candidate.canClaim)
+            )
+
+        if any(takes(r) for r in pool):
+            return
+        vocab = sorted({x for r in pool if isinstance(r.canClaim, list) for x in r.canClaim})
+        who = f"role {role!r}" if role is not None else "any role"
+        known = f"; known labels: {vocab}" if vocab else "; no role carries labels"
+        raise PotError(
+            "role_mismatch",
+            f"{sorted(want)} cannot be claimed by {who}{known}"
+            " — use labels from one role's list, or leave labels empty",
+        )
 
     def create(
         self,

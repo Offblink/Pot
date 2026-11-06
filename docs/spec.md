@@ -144,7 +144,7 @@ Fungi 砍成**纯单机**本机 Agent（保留桌面控制、MCP、技能与日�
 
 | 闸 | 规则 | 违反返回 |
 |---|---|---|
-| 角色匹配 | `labels ⊆ role.canClaim` 且 `card.role` 匹配 | `role_mismatch` |
+| 角色匹配 | `labels ⊆ role.canClaim` 且 `card.role` 匹配；**建卡即验**（裁决 42：labels 无任何角色可领 → 创建当场拒，错误带现词表） | `role_mismatch` |
 | WIP | **同一实例**的 holder 数 < role.wip（一实例一会话——裁决 33） | `wip_full` |
 | 持有保护 | holder 非空不可被第三方抢 | `already_held` |
 | 乐观锁 | ifVersion 不匹配拒绝写 | `stale_version` |
@@ -340,6 +340,7 @@ M5+，届时单独裁决（自备 Python 还是要塞进安装包）。
 | 39 | 并行派工（2026-11-06 追加，用户「多 agent → 多像素」） | `dispatch_pending` 改**先收集、再并发**：一个周期先为每张可认领卡分配**不同实例**（本周期已分配的实例计满 → 触发裁决 33 增殖），再用有界线程池（`_MAX_PARALLEL=4`，限的是同时在飞的模型 API 调用）并行跑 `run_turn`；`_CYCLE` 持到全部回合汇合——嵌套唤醒拿不到锁、非阻塞直接返回。并发前提实测成立：`jobs` 的当前会话是 thread-local（不是全局态）、看板每操作独立连接 + BEGIN IMMEDIATE + WAL、告警与会话锁各自有锁 |
 | 40 | 卡片退役通道（2026-11-06 追加，E；用户选「planner 可 retire 自己 source 的卡」） | 新工具 **`pot_board_retire`**（`Board.retire`）：**planner_only 闸 + reason 必填 + ifVersion**，把**自己 source 的活卡**（todo/doing/blocked）软删（`deleted=1`、`retired: <reason>` 进评论）——死卡不再永远堵 todo。**done 不可退役**（历史归场景，人经详情重开/删除）；无 source 的人卡只归人（WebUI 详情删除不变）；别会话的卡报 `not_your_card`；重退 `no_such_card`。Planner 提示词加一条自有卡退役说明 |
 | 41 | 内置分工（2026-11-06 追加，用户「设计几个合理的分工内置到项目里」） | **五个内置角色随 `roles_repo()` 播种**（seed-if-missing，与 Planner 同语义：人可改可删、删除下次启动补回）：`executor` 执行者（`canClaim:["coding"]`，shell/files/search，通用+编码；无标签卡是任何列表的子集、按文件名序归它）、`writer` 写手（`docs`，files/search）、`tester` 测试员（`test`，shell/files，只报不修）、`researcher` 研究员（`research`，web/search/files，只查不改）、`reviewer` 审稿人（`review`，files/search，只审不改）。全部 `wip:5`（2026-11-06 用户定：1太少、30 太多）、`canCreateCard:false`。**分工判据 = 卡片标签 ⊆ 角色 canClaim**；无标签卡按角色文件名序归执行者（executor 排最前） |
+| 42 | 建卡标签预检（2026-11-06 追加，Planner 死卡事故：Spore 宣传片两张卡 labels `video/design/capture` 无角色可领——建卡 `ok:true`、派工 `eligible()` 静默跳过、todo 永远进不了 `blocked` 所以 `stuck_note`（裁决34）永不触发，全链路零信号，用户「到现在无人认领」才发现） | **`_insert`（create/human_create 唯一入口）镜像角色匹配闸**：labels 非空且**没有任何角色**的 canClaim 覆盖它（钉了 `role` 就只算被钉角色）→ 创建即 `role_mismatch`，错误携带**现词表**与「留空=无标签卡任何角色可领」——死卡不再上板，发卡方一次改对。claim 侧同名闸保留：建卡后人改 canClaim 造成的**存量漂移**仍由它与派工跳过兜住 |
 
 ## 10. 风险
 
