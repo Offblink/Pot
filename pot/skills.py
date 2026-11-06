@@ -191,6 +191,20 @@ def save(name: str, description: str, body: str) -> str:
 SECTION_HEAD = "\n\n## Skills\n"
 
 
+def insert_before_section(content: str, block: str) -> str:
+    """Splice a prompt block in BEFORE the managed skills suffix.
+
+    `Agent.run` cuts at SECTION_HEAD and re-appends `section()` every turn —
+    anything appended after the skills block would be amputated there
+    (裁决 43: the memory index vanished exactly that way)."""
+    if not block:
+        return content
+    cut = content.find(SECTION_HEAD)
+    if cut == -1:
+        return content + block
+    return content[:cut] + block + content[cut:]
+
+
 def section() -> str:
     """System-prompt block listing available skills; fresh on every call."""
     all_skills = load_all()

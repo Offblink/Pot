@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from pot import agents, dispatch, jobs, runlog, session
+from pot import agents, dispatch, jobs, mem, runlog, session, skills
 from pot.agent import SYSTEM_PROMPT, Agent, BoundTool, public_messages
 from pot.config import (
     PROJECT_ROOT,
@@ -1110,6 +1110,7 @@ def _execute_turn(
     """The turn core, shared by HTTP chat turns and host-driven turns:
     register /stop → queue behind the session lock → load → run → save →
     alert → seal the tape → schedule the after-turn hooks."""
+    loaded_from_store = messages is None
     if messages is None and not session_id:
         session_id = runtime.new_session_id()
     abort_event = threading.Event()
@@ -1138,6 +1139,22 @@ def _execute_turn(
                     messages.append(row)
             messages = repair_tool_gaps(messages)
 
+            # 裁决 43: a role wake rebuilds the model's view instead of
+            # replaying its transcript (executor reached 10.47MB ≈ 1.05M
+            # tokens → HTTP 400). `messages` stays the FULL storage view
+            # (scrollback/forensics unchanged); `run` is what the model gets:
+            # system row + this wake's input only — the system row gains the
+            # memory index and last wake's closing words below.
+            role_id = str((stored or {}).get("role") or "") if loaded_from_store else ""
+            run = messages
+            if role_id and user_msg is not None:
+                head = (
+                    dict(messages[0])
+                    if messages and messages[0].get("role") == "system"
+                    else {"role": "system", "content": ""}
+                )
+                run = [head, messages[-1]]  # last row = the brief just appended
+
             # Persist at turn start: the user message must be on disk while
             # the turn streams. Otherwise a refresh mid-turn shows an empty
             # session and invites chatting into / deleting one that is busy.
@@ -1165,15 +1182,25 @@ def _execute_turn(
                 _TURN_TAPES[session_id] = []
             agent = runtime.build_agent(sink, abort_event.is_set)
             fresh_prompt = getattr(agent, "system_prompt", None)
-            if fresh_prompt and messages and messages[0].get("role") == "system":
+            if fresh_prompt and run and run[0].get("role") == "system":
                 # The system row is host-managed: the rebuilt prompt (Planner
                 # addendum, live role mission, skills) must reach the model —
                 # a row frozen at session creation would pin the retired
                 # trilayer prompt forever.
-                messages[0] = {"role": "system", "content": fresh_prompt}
+                run[0] = {"role": "system", "content": fresh_prompt}
+            if run is not messages and run[0].get("role") == "system":
+                # 裁决 43: memory index (summary TITLES only — full text via
+                # pot_memory_read) + where it left off. Rebuilt every wake
+                # from data/mem/, never persisted into the transcript.
+                # Spliced BEFORE the skills suffix: agent.run re-manages that
+                # suffix and would cut anything appended after it.
+                block = mem.index_section(role_id) + mem.recap_section(messages)
+                if block:
+                    run[0]["content"] = skills.insert_before_section(run[0]["content"], block)
+            run_len = len(run)
             jobs.set_current_session(session_id)
             try:
-                agent.run(messages)
+                agent.run(run)
             finally:
                 jobs.set_current_session(None)
                 # Persist on every exit path (success, abort, crash): a
@@ -1184,10 +1211,13 @@ def _execute_turn(
                     if resurrects:
                         _TURN_DELETED.discard(session_id)
                 if not resurrects:
+                    # The windowed view dropped history rows; the storage view
+                    # keeps them, so splice the rows THIS turn produced back on.
+                    rows = messages if run is messages else messages + run[run_len:]
                     runtime.sessions_save(
                         session_id,
                         title,
-                        public_messages(messages),
+                        public_messages(rows),
                         subagents=prior,
                         asks=prior_asks + new_asks,
                     )

@@ -7,7 +7,7 @@ creates cards, roles claim and execute them, a human alone accepts (done).
 
 from __future__ import annotations
 
-from pot import diary, runlog, skills
+from pot import diary, mem, runlog, skills
 from pot.agent import SYSTEM_PROMPT, Agent, BoundTool
 from pot.config import Config
 from pot.events import Sink
@@ -72,6 +72,12 @@ report them with the `pot_board_*` tools. These rules are absolute:
   report as the deliverable — there is no acceptance step to wait for.
 - Stuck or waiting on something outside your role? `pot_board_move` to
   blocked with a comment explaining why, then release what you hold.
+- Your transcript is NOT replayed on later wakes: after
+  `pot_board_report`, if the task produced knowledge future cards need
+  (paths, decisions, gotchas, what not to retry), save ONE short summary
+  with `pot_memory_write` — optional, only when worth keeping. Your prompt
+  carries the index; fetch a summary's full text with `pot_memory_read`.
+  In-progress state lives on the card — tick the checklist as you go.
 - You do not talk to the user — your report IS the communication. There is no
   `inquire` tool here; do not improvise one.
 """
@@ -195,6 +201,7 @@ def build_role(
     )
     extra: dict[str, BoundTool] = {
         **_board_tools(board, actor),
+        **mem.bound(role.id),
         # Autonomous workers may read skills but never rewrite the prompt store.
         **skills.bound(readonly=True),
     }
