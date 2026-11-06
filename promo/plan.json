@@ -1,0 +1,183 @@
+{
+  "product": "Pot",
+  "title": "Pot 宣传片 · 一台机器。一块板。",
+  "lang": "zh",
+  "fps": 30,
+  "width": 1920,
+  "height": 1080,
+  "durationInFrames": 1200,
+  "audio": {
+    "voiceover": false,
+    "bgm": true,
+    "sfx": true,
+    "bgmBpm": 120,
+    "note": "120 BPM 使 6 个镜头边界（120/300/540/690/915f）全部落在整拍 8/20/36/46/61 上"
+  },
+  "theme": "把「一条对话」换成「一块看板」；工作不在对话里，在板上。",
+  "energyCurve": "low → mid → mid-high → high → breath",
+  "shots": [
+    {
+      "id": "S1",
+      "from": 0,
+      "dur": 120,
+      "card": "glass-pill-dictation-typing",
+      "styleKey": "glass-pill-dictation-typing",
+      "demo": "demos/interaction/glass-pill-dictation-typing/GlassPillDictationTyping.tsx",
+      "caption": "你只给它一句话",
+      "captionFrom": 92,
+      "cards": [
+        {
+          "card": "glass-pill-dictation-typing",
+          "styleKey": "glass-pill-dictation-typing",
+          "demo": "demos/interaction/glass-pill-dictation-typing/GlassPillDictationTyping.tsx",
+          "layer": "物件（输入框）"
+        }
+      ],
+      "beats": [
+        { "label": "静置：输入框在位，光标闪一次", "from": 0, "dur": 6 },
+        { "label": "胶囊 scale 1.25→1 落位（snappy）+ 景深 6px→0", "from": 6, "dur": 20 },
+        { "label": "逐字打出「把 README 里过期的地方找出来」18 字 × 3f = 54f", "from": 26, "dur": 54 },
+        { "label": "光退完（g 与打字同窗），光标停", "from": 80, "dur": 6 },
+        { "label": "回车：键压 8px + 输入框 4f ripple", "from": 86, "dur": 6 },
+        { "label": "送出 + 落定呼吸（字幕 8f 入场）", "from": 92, "dur": 28 }
+      ]
+    },
+    {
+      "id": "S2",
+      "from": 120,
+      "dur": 180,
+      "card": "row-embed",
+      "styleKey": "row-embed",
+      "demo": "demos/ui-entrance/row-embed/RowEmbed.tsx",
+      "caption": "它没有留在对话里，它落在板上。",
+      "captionFrom": 144,
+      "cards": [
+        {
+          "card": "row-embed",
+          "styleKey": "row-embed",
+          "demo": "demos/ui-entrance/row-embed/RowEmbed.tsx",
+          "layer": "物件（一句话 → 一张卡，嵌入板心空槽）"
+        },
+        {
+          "card": "crane-rise-reveal",
+          "styleKey": "crane-rise-reveal",
+          "demo": "demos/opening/crane-rise-reveal/CraneRiseReveal.tsx",
+          "layer": "相机（3.0x 特写 → 沿 Y 升起后拉 → 整块俯视场景）"
+        }
+      ],
+      "beats": [
+        { "label": "3.0x 特写板心空槽（其余行 38%）：卡从上方降下、rotateX 16°→0 收平、press 0.996→1、底边 2px 绿缝 5f", "from": 120, "dur": 24 },
+        { "label": "crane 拉升 102f：scale 3.0→1.0，逐行洗光，工位/顶点/像素方块入场", "from": 144, "dur": 102 },
+        { "label": "落定 + 余波（卡状态胶囊亮起）+ 静止", "from": 246, "dur": 39 },
+        { "label": "极缓推近 1→1.018 + rest", "from": 285, "dur": 15 }
+      ]
+    },
+    {
+      "id": "S3",
+      "from": 300,
+      "dur": 240,
+      "card": "crash-zoom-punch",
+      "styleKey": "crash-zoom-punch",
+      "demo": "demos/camera/crash-zoom-punch/CrashImpactReal.tsx",
+      "caption": "谁认领，由标签决定",
+      "captionFrom": 444,
+      "cards": [
+        {
+          "card": "crash-zoom-punch",
+          "styleKey": "crash-zoom-punch",
+          "demo": "demos/camera/crash-zoom-punch/CrashImpactReal.tsx",
+          "layer": "相机（撞停款：6f 急推 + 震屏）"
+        }
+      ],
+      "beats": [
+        { "label": "全景 hold（前 hold ≥30f）：整块板 + 那行卡", "from": 300, "dur": 36 },
+        { "label": "急推 6f zoom 1→2.5 ease-in（slam #1 起）", "from": 336, "dur": 6 },
+        { "label": "撞停 + 顿帧 2f", "from": 342, "dur": 2 },
+        { "label": "震屏 14px·e^(-t/1.8) 衰减到 0", "from": 344, "dur": 6 },
+        { "label": "特写 hold：标签「写手」与角色可认领集不交集 → 红 role_mismatch，卡退 4px", "from": 350, "dur": 40 },
+        { "label": "标签行补上「执行」chip（outBack 轻过冲 11f）", "from": 390, "dur": 30 },
+        { "label": "相机拉回全景 24f（smooth）", "from": 420, "dur": 24 },
+        { "label": "卡从待办滑到进行中（30f）+ 身份 #1 落位（mono 12f）+ 顶点像素方块亮起（明度跳变 6f）+ 租约环起转（18f）", "from": 444, "dur": 66 },
+        { "label": "落定 hold 30f（关键信息静止 ≥1s）", "from": 510, "dur": 30 }
+      ]
+    },
+    {
+      "id": "S4",
+      "from": 540,
+      "dur": 150,
+      "card": "quad-split-parallel-scenes",
+      "styleKey": "quad-split-parallel-scenes",
+      "demo": "demos/rhythm/quad-split-parallel-scenes/QuadSplitParallelScenes.tsx",
+      "caption": "配额满了，就多开一个",
+      "captionFrom": 546,
+      "cards": [
+        {
+          "card": "quad-split-parallel-scenes",
+          "styleKey": "quad-split-parallel-scenes",
+          "demo": "demos/rhythm/quad-split-parallel-scenes/QuadSplitParallelScenes.tsx",
+          "layer": "结构（2×2 硬切四宫格，错拍重排）"
+        }
+      ],
+      "beats": [
+        { "label": "硬切 2×2（8px 缝、20px 圆角，缝色 --border）", "from": 540, "dur": 6 },
+        { "label": "四格并行轰炸（错拍 3–6f）：TL 写手建卡打字 / TR 审稿读卡勾清单 / BL 执行者#1 工具卡耗时跳数 / BR wip 1/1 满→红→复印出 exec#2→×2", "from": 546, "dur": 94 },
+        { "label": "四格终态 hold（拼成一张海报）", "from": 640, "dur": 20 },
+        { "label": "四格收拢回一整块板（缝收 0、圆角回 14）", "from": 660, "dur": 15 },
+        { "label": "静止（批量动效收尾 0.5s）", "from": 675, "dur": 15 }
+      ]
+    },
+    {
+      "id": "S5",
+      "from": 690,
+      "dur": 225,
+      "card": "doc-park-left-pill-deal",
+      "styleKey": "doc-park-left-pill-deal",
+      "demo": "demos/ui-entrance/doc-park-left-pill-deal/DocParkLeftPillDeal.tsx",
+      "caption": "报告交回，卡就完成了",
+      "captionFrom": 720,
+      "cards": [
+        {
+          "card": "doc-park-left-pill-deal",
+          "styleKey": "doc-park-left-pill-deal",
+          "demo": "demos/ui-entrance/doc-park-left-pill-deal/DocParkLeftPillDeal.tsx",
+          "layer": "物件（会话让位 + 报告三块慢发牌）"
+        }
+      ],
+      "beats": [
+        { "label": "完成拍：派工卡上浮 6px + 顿帧 2f + 3px 微震（slam #2）+ 划掉线 12f + 压暗 + 绿勾 7f + mono done", "from": 690, "dur": 30 },
+        { "label": "会话 park 左滑 55% / scale 0.92（inOutCubic，0.06→0.22 窗）", "from": 720, "dur": 43 },
+        { "label": "报告块①落定（767f cue：fade 6f + outBack 11f）+ 逐词字幕", "from": 763, "dur": 43 },
+        { "label": "报告块②落定（806f cue）+ 逐词字幕", "from": 806, "dur": 39 },
+        { "label": "报告块③落定（845f cue）+ 逐词字幕 + 会话内原指令荧光笔（851–870）", "from": 845, "dur": 50 },
+        { "label": "静止：三块报告 + 会话驻留（0.5s+）", "from": 895, "dur": 20 }
+      ]
+    },
+    {
+      "id": "S6",
+      "from": 915,
+      "dur": 285,
+      "card": "ui-strip-away-outro",
+      "styleKey": "ui-strip-away-outro",
+      "demo": "demos/outro/ui-strip-away-outro/UiStripAwayOutro.tsx",
+      "caption": "一台机器。一块板。",
+      "captionFrom": 1135,
+      "cards": [
+        {
+          "card": "ui-strip-away-outro",
+          "styleKey": "ui-strip-away-outro",
+          "demo": "demos/outro/ui-strip-away-outro/UiStripAwayOutro.tsx",
+          "layer": "结构（6 层错峰蒸发 → 按钮升格 → 字标接棒）"
+        }
+      ],
+      "beats": [
+        { "label": "呼吸位：整板满幅静止（含那张已划掉压暗的卡）+ 极缓推近 1.008", "from": 915, "dur": 30 },
+        { "label": "点板头 🪴 圆钮（spring 压缩）+ 6 层蒸发（每 4f 一层、每层 14f ease-in）+ 背景压到 #06060a", "from": 945, "dur": 45 },
+        { "label": "按钮滑到屏心 ×1.5 + 白晕 30→70px", "from": 990, "dur": 22 },
+        { "label": "按钮 12f 淡出 → 字标 spring 接棒（86%→100%）", "from": 1012, "dur": 30 },
+        { "label": "字标 hold（3.1s ≥ 1.2s）", "from": 1042, "dur": 93 },
+        { "label": "tail「一台机器。一块板。」逐字落定", "from": 1135, "dur": 40 },
+        { "label": "完全静止收尾", "from": 1175, "dur": 25 }
+      ]
+    }
+  ]
+}

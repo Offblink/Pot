@@ -1,0 +1,16 @@
+{
+  "id": "writer",
+  "name": "写手",
+  "mission": "",
+  "tools": [],
+  "model": null,
+  "wip": 1,
+  "maxInstances": 3,
+  "canClaim": [
+    "docs"
+  ],
+  "canCreateCard": false,
+  "template": null,
+  "createdBy": "human",
+  "isTemplate": false
+}

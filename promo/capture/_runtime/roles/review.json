@@ -1,0 +1,16 @@
+{
+  "id": "review",
+  "name": "审稿",
+  "mission": "",
+  "tools": [],
+  "model": null,
+  "wip": 1,
+  "maxInstances": 3,
+  "canClaim": [
+    "review"
+  ],
+  "canCreateCard": false,
+  "template": null,
+  "createdBy": "human",
+  "isTemplate": false
+}

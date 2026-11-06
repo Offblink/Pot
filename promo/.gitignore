@@ -1,0 +1,6 @@
+# The promo studio ships its sources only: the 907MB dependency tree and
+# the rendered outputs (69MB of mp4/logs) stay out. The README embeds the
+# final cut via a GitHub user-attachment, not a repo file.
+node_modules/
+out/
+*.log

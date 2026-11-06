@@ -1,0 +1,160 @@
+{
+  "note": "本片采集用的虚构播种数据（可重放）：角色 / 卡 / 会话。无真实用户名、路径、key、模型名。",
+  "roles": [
+    {
+      "id": "writer",
+      "name": "写手",
+      "canClaim": [
+        "docs"
+      ],
+      "wip": 1
+    },
+    {
+      "id": "review",
+      "name": "审稿",
+      "canClaim": [
+        "review"
+      ],
+      "wip": 1
+    },
+    {
+      "id": "exec",
+      "name": "执行者",
+      "canClaim": [],
+      "wip": 2
+    }
+  ],
+  "instances": [
+    {
+      "role": "writer",
+      "session": "writer-1",
+      "number": 1
+    },
+    {
+      "role": "review",
+      "session": "review-1",
+      "number": 1
+    },
+    {
+      "role": "exec",
+      "session": "exec-1",
+      "number": 1
+    },
+    {
+      "role": "exec",
+      "session": "exec-2",
+      "number": 2
+    }
+  ],
+  "cards": [
+    {
+      "title": "给续传章节补中文注释",
+      "labels": [
+        "docs"
+      ],
+      "status": "doing",
+      "holder": "writer:writer-1"
+    },
+    {
+      "title": "把上传卡在 99% 的问题钉住",
+      "labels": [
+        "coding"
+      ],
+      "priority": "urgent",
+      "status": "doing",
+      "holder": "exec:exec-1"
+    },
+    {
+      "title": "给看板加导出 CSV",
+      "labels": [
+        "coding"
+      ],
+      "status": "doing",
+      "holder": "exec:exec-2"
+    },
+    {
+      "title": "核对发布页的旧截图",
+      "labels": [
+        "review"
+      ],
+      "status": "blocked",
+      "holder": "review:review-1"
+    },
+    {
+      "title": "整理发布清单",
+      "labels": [
+        "docs"
+      ],
+      "status": "todo"
+    },
+    {
+      "title": "修托盘菜单字体",
+      "labels": [
+        "coding"
+      ],
+      "priority": "low",
+      "status": "todo"
+    },
+    {
+      "title": "把 README 里过期的地方找出来",
+      "labels": [
+        "docs"
+      ],
+      "status": "todo"
+    },
+    {
+      "title": "给续传章节补边界说明",
+      "labels": [
+        "docs"
+      ],
+      "status": "done",
+      "holder": "writer:writer-1"
+    },
+    {
+      "title": "清掉无用的调试日志",
+      "labels": [
+        "coding"
+      ],
+      "status": "done",
+      "holder": "exec:exec-1"
+    }
+  ],
+  "sessions": [
+    {
+      "id": "writer-1",
+      "title": "写手",
+      "role": "writer",
+      "instance": 1
+    },
+    {
+      "id": "review-1",
+      "title": "审稿",
+      "role": "review",
+      "instance": 1
+    },
+    {
+      "id": "exec-1",
+      "title": "执行者",
+      "role": "exec",
+      "instance": 1
+    },
+    {
+      "id": "exec-2",
+      "title": "执行者",
+      "role": "exec",
+      "instance": 2
+    },
+    {
+      "id": "chat-1",
+      "title": "我的会话",
+      "role": null,
+      "messages": [
+        "user: 把 README 里过期的地方找出来",
+        "assistant: 已经拆成三张卡放进看板…",
+        "assistant(tool_call): pot_board_create",
+        "tool(result): created p-3f21ac · 整理发布清单 · todo",
+        "assistant: 📋 卡片已完成（pot.dispatch.done_block 真实渲染）"
+      ]
+    }
+  ]
+}

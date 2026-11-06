@@ -1,0 +1,14 @@
+{
+  "id": "exec",
+  "name": "执行者",
+  "mission": "",
+  "tools": [],
+  "model": null,
+  "wip": 2,
+  "maxInstances": 3,
+  "canClaim": [],
+  "canCreateCard": false,
+  "template": null,
+  "createdBy": "human",
+  "isTemplate": false
+}
