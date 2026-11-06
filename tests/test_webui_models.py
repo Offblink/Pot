@@ -332,3 +332,33 @@ def test_a_probe_that_answers_teaches_the_pair(page, asked):
         "m1"
         not in json.loads(config_mod.CONFIG_PATH.read_text(encoding="utf-8"))["model_providers"]
     )
+
+
+def test_the_dropdown_reopens_the_config_modal_to_add_a_model(page, asked):
+    """用户 2026-11-06「目前没有模型名称的修改」：配置弹窗原来只在未配置时自动弹，
+    配置好的宿主再也改不了模型名。现在下拉底部「＋ 添加模型…」随时重开同一张表单
+    （同一个 /configure）；密钥/端点留空 = 沿用当前那套（首次配置才必填密钥）。"""
+    page.wait_for_function("() => document.querySelectorAll('.model-item').length")
+    page.wait_for_selector("#cfg-save[data-ready]", state="attached")  # boot listeners bound
+
+    def open_menu():
+        if page.evaluate(
+            "() => document.getElementById('model-select').getAttribute('aria-expanded') !== 'true'"
+        ):
+            page.click("#model-select")
+
+    open_menu()
+    page.click(".model-menu-add")
+    page.wait_for_selector("#config-overlay.show")
+    page.fill("#cfg-model", "m3")  # key + endpoint left blank on purpose
+    page.click("#cfg-save")
+    page.wait_for_function(
+        "() => !document.getElementById('config-overlay').classList.contains('show')"
+    )
+
+    open_menu()
+    page.wait_for_selector('.model-menu .model-item[data-model="m3"]')
+    cfg = config_mod.load_config()
+    assert "m3" in cfg.model_list
+    # blank fields kept the pair the fixture seeded — nothing retyped, nothing lost
+    assert cfg.api_key == "k" and cfg.endpoint == "http://127.0.0.1:1/v1"

@@ -88,6 +88,8 @@ html,body{font-family:var(--font);font-size:var(--fs-md);line-height:1.6;color:v
 .model-item:hover,.model-item.held{background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--text)}
 .model-item.current{color:var(--accent2)}
 .model-item.current .model-item-tick{opacity:1}
+.model-menu-add{display:block;width:100%;padding:5px 8px;border:none;border-top:1px solid var(--border);background:none;color:var(--accent);font-family:var(--mono);font-size:0.72rem;text-align:left;cursor:pointer;border-radius:0 0 var(--radius-xs) var(--radius-xs)}
+.model-menu-add:hover{background:color-mix(in srgb,var(--accent) 12%,transparent)}
 #hamburger-sidebar{background:none;border:none;color:var(--dim);cursor:pointer;padding:5px 7px;border-radius:var(--radius-xs);font-size:16px;transition:all var(--t-fast)}
 #hamburger-sidebar:hover{color:var(--text)}
 /* 顶栏「看板」= 俯视场景入口（裁决 36/37）。此前无任何规则：浏览器默认按钮 +

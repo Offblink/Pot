@@ -15,7 +15,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__POT_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__POT_WEB_VER = 'web-batch-delete';
+  window.__POT_WEB_VER = 'web-model-add';
   try { console.info('[pot-web]', window.__POT_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -1301,9 +1301,15 @@
             (m === current ? ' current' : '') +
             '" data-model="' + escapeHtml(m) + '" aria-selected="' + (m === current) + '">' +
             '<span class="model-item-name">' + escapeHtml(m) + '</span>' +
-            '<span class="model-item-tick" aria-hidden="true">\u2713</span></button>'
+            '<span class="model-item-tick" aria-hidden="true">✓</span></button>'
         )
-        .join('');
+        .join('') +
+        /* 不叫 model-item：既有测试把 .model-item 全集当「名单」读，键盘上下也只走名单。
+           2026-11-06 用户「目前没有模型名称的修改」——配置弹窗原来只在未配置时开，
+           这一行让它随时可重开（同一份 §66 表单、同一个 /configure）。 */
+        '<button type="button" class="model-menu-add">' +
+        escapeHtml(L.addModel || T('model.addModel')) +
+        '</button>';
     }
     /* 贴着触发器下方，**左沿对齐**并夹在视口里：桌面上触发器偏左（Fungi 之后），手机上它在
        顶栏最左边 —— 按右沿对齐会让面板从触发器往左长，窄屏上直接长到屏幕外（实测第一版就是
@@ -1404,12 +1410,15 @@
       else open();
     });
     menu.addEventListener('click', e => {
-      const row = e.target.closest ? e.target.closest('.model-item') : null;
+      const row = e.target.closest ? e.target.closest('.model-item, .model-menu-add') : null;
       if (!row) return;
       e.stopPropagation();
-      const name = row.dataset.model;
       close();
-      use(name);
+      if (row.classList.contains('model-menu-add')) {
+        if (opts.onAdd) opts.onAdd();
+        return;
+      }
+      use(row.dataset.model);
     });
     trigger.addEventListener('keydown', e => {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {

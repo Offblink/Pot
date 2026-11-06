@@ -1171,6 +1171,18 @@ const modelPicker = FC.mountModelPicker({
   labels: {
     switching: T('model.switching'), ok: T('model.answers'),
     bad: T('model.failed'), served: T('model.servedAs'),
+    addModel: T('model.addModel'),
+  },
+  /* 下拉底部「＋ 添加模型…」随时重开配置弹窗（2026-11-06 用户「目前没有模型
+     名称的修改」）：弹窗原来只在未配置时自动弹。模型名留空=不动名单，密钥留空
+     = 沿用当前（首次配置才必填，见 boot 里的 keyRequired 判定）。 */
+  onAdd: () => {
+    document.getElementById('cfg-err').style.display = 'none';
+    document.getElementById('cfg-model').value = '';
+    document.getElementById('cfg-endpoint').value = '';
+    document.getElementById('cfg-apikey').value = '';
+    document.getElementById('config-overlay').classList.add('show');
+    document.getElementById('cfg-model').focus();
   },
 });
 loadSessions().then(() => {
@@ -1244,30 +1256,37 @@ setInterval(pollPendingAsks, 3000);
       return;
     }
     const d = await r.json();
-    if (!d.configured) {
-      document.getElementById('config-overlay').classList.add('show');
-      document.getElementById('cfg-save').addEventListener('click', async () => {
-        const api_key = document.getElementById('cfg-apikey').value.trim();
-        const endpoint = document.getElementById('cfg-endpoint').value.trim();
-        const model = document.getElementById('cfg-model').value.trim();
-        if (!api_key) {
-          const err = document.getElementById('cfg-err');
-          err.textContent = T('cfg.keyRequired'); err.style.display = 'block';
-          return;
+    const configuredNow = !!d.configured;
+    /* Listeners bind on EVERY load now: the header dropdown's 「＋ 添加模型…」
+       reopens this same modal on an already-configured host (2026-11-06), so
+       save must work there too. A blank key keeps the current one — only the
+       first-run flow demands it (server skips empty fields). */
+    document.getElementById('cfg-save').addEventListener('click', async () => {
+      const api_key = document.getElementById('cfg-apikey').value.trim();
+      const endpoint = document.getElementById('cfg-endpoint').value.trim();
+      const model = document.getElementById('cfg-model').value.trim();
+      if (!api_key && !configuredNow) {
+        const err = document.getElementById('cfg-err');
+        err.textContent = T('cfg.keyRequired'); err.style.display = 'block';
+        return;
+      }
+      try {
+        const r2 = await fetch('/configure', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key, endpoint, model }) });
+        const d2 = await r2.json();
+        if (d2.ok) {
+          document.getElementById('config-overlay').classList.remove('show');
+          if (modelPicker) modelPicker.load();  // §66: the name just typed is now in the dropdown
         }
-        try {
-          const r2 = await fetch('/configure', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ api_key, endpoint, model }) });
-          const d2 = await r2.json();
-          if (d2.ok) {
-            document.getElementById('config-overlay').classList.remove('show');
-            if (modelPicker) modelPicker.load();  // §66: the name just typed is now in the dropdown
-          }
-        } catch (e) {}
-      });
-      document.getElementById('cfg-skip').addEventListener('click', () => {
-        document.getElementById('config-overlay').classList.remove('show');
-      });
+      } catch (e) {}
+    });
+    document.getElementById('cfg-skip').addEventListener('click', () => {
+      document.getElementById('config-overlay').classList.remove('show');
+    });
+    // A listener is invisible; e2e waits on this before trusting the save button.
+    document.getElementById('cfg-save').dataset.ready = '1';
+    if (!configuredNow) {
+      document.getElementById('config-overlay').classList.add('show');
     }
   } catch (e) {}
 })();

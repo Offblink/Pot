@@ -166,6 +166,7 @@
       'model.answers': '可用',
       'model.failed': '调不通',
       'model.servedAs': '实际是',
+      'model.addModel': '＋ 添加模型…',
 
       /* ---- desktop shell (app.js) ---- */
       'desktop.rename': '重命名',
@@ -413,6 +414,7 @@
       'model.answers': 'answers',
       'model.failed': 'failed',
       'model.servedAs': 'served as',
+      'model.addModel': '＋ Add model…',
 
       'desktop.rename': 'Rename',
       'desktop.pin': 'Pin / unpin',
