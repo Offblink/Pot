@@ -249,3 +249,31 @@ def test_default_roles_repo_seeds_planner(tmp_path, monkeypatch):
     assert planner.canCreateCard is True
     assert planner.canClaim is False  # 派活不抢活 (spec §3.3)
     assert planner.createdBy == "human"
+
+
+def test_builtin_roles_seed_edit_sticks_and_delete_reseeds(tmp_path, monkeypatch):
+    """裁决 41: the built-in division of labor seeds beside the Planner —
+    five roles on a fresh dir, a human edit survives, a delete re-seeds."""
+    monkeypatch.setattr(dispatch, "ROLES_DIR", tmp_path / "roles")
+    monkeypatch.setattr(dispatch, "_SINGLETONS", {})
+    repo = dispatch.roles_repo()
+
+    ids = {r.id for r in repo.list()}
+    assert {"planner", "executor", "writer", "tester", "researcher", "reviewer"} <= ids
+    ex = repo.get("executor")
+    assert ex.canClaim == ["全部", "coding"] and ex.wip == 1 and ex.canCreateCard is False
+    assert repo.get("writer").canClaim == ["docs"]
+    assert repo.get("tester").canClaim == ["test"]
+    assert repo.get("researcher").tools == ["web", "search", "files"]
+    assert repo.get("reviewer").canClaim == ["review"]
+    assert all(not r.isTemplate and r.createdBy == "human" for r in repo.list())
+
+    # a human edit sticks: seeding is if-missing, never an overwrite
+    repo.update("writer", {"mission": "hand-edited"}, creator="human")
+    monkeypatch.setattr(dispatch, "_SINGLETONS", {})
+    assert dispatch.roles_repo().get("writer").mission == "hand-edited"
+
+    # a delete re-seeds on the next start (the Planner's semantics)
+    (tmp_path / "roles" / "writer.json").unlink()
+    monkeypatch.setattr(dispatch, "_SINGLETONS", {})
+    assert dispatch.roles_repo().get("writer").mission != "hand-edited"

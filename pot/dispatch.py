@@ -39,6 +39,84 @@ _PLANNER_SEED = {
     "isTemplate": False,
 }
 
+# 裁决 41: the built-in division of labor — seed-if-missing beside the Planner
+# (same semantics: a human may edit or delete them; a delete re-seeds on the
+# next start). Division runs on labels: a card is claimable when its labels are
+# a subset of the role's canClaim, so unlabeled/generic cards fall to executor
+# (sorted first by filename) and docs/test/research/review go to their lane.
+_BUILTIN_SEEDS: tuple[dict, ...] = (
+    {
+        "id": "executor",
+        "name": "执行者",
+        "mission": (
+            "You carry out task cards on this machine: read what the card asks"
+            " for, run the commands, create the files, and report exactly what"
+            " you did."
+        ),
+        "tools": ["shell", "files", "search"],
+        "wip": 1,
+        "maxInstances": 3,
+        "canClaim": ["全部", "coding"],
+        "canCreateCard": False,
+    },
+    {
+        "id": "writer",
+        "name": "写手",
+        "mission": (
+            "You write and revise prose: READMEs, docs, comments, changelogs,"
+            " translations. Ground every claim in files you actually read;"
+            " never invent their contents."
+        ),
+        "tools": ["files", "search"],
+        "wip": 1,
+        "maxInstances": 3,
+        "canClaim": ["docs"],
+        "canCreateCard": False,
+    },
+    {
+        "id": "tester",
+        "name": "测试员",
+        "mission": (
+            "You verify: run the suites and commands the card names, capture"
+            " the real output, and report pass/fail with the exact failure"
+            " text. Never fix code — report only."
+        ),
+        "tools": ["shell", "files"],
+        "wip": 1,
+        "maxInstances": 3,
+        "canClaim": ["test"],
+        "canCreateCard": False,
+    },
+    {
+        "id": "researcher",
+        "name": "研究员",
+        "mission": (
+            "You research: search the web and the repo, compare options, and"
+            " return a short evidence-backed summary with sources. No code"
+            " changes."
+        ),
+        "tools": ["web", "search", "files"],
+        "wip": 1,
+        "maxInstances": 3,
+        "canClaim": ["research"],
+        "canCreateCard": False,
+    },
+    {
+        "id": "reviewer",
+        "name": "审稿人",
+        "mission": (
+            "You review: read the named files, judge correctness and risks"
+            " against the card's criteria, and file a verdict with concrete"
+            " findings. No edits."
+        ),
+        "tools": ["files", "search"],
+        "wip": 1,
+        "maxInstances": 3,
+        "canClaim": ["review"],
+        "canCreateCard": False,
+    },
+)
+
 # Singletons live in a dict (mutated, never rebound) — no global statements.
 # RLock, not Lock: board() seeds by calling roles_repo() while holding this
 # lock (first use in a fresh process) — a plain Lock self-deadlocks the very
@@ -57,8 +135,9 @@ def roles_repo() -> RoleRepo:
         with _CREATE_LOCK:  # first call may race; seed exactly once
             if "roles" not in _SINGLETONS:
                 repo = RoleRepo(ROLES_DIR)
-                if not (ROLES_DIR / "planner.json").is_file():
-                    repo.create(dict(_PLANNER_SEED), creator="human")
+                for seed in (_PLANNER_SEED, *_BUILTIN_SEEDS):  # 裁决 41
+                    if not (ROLES_DIR / f"{seed['id']}.json").is_file():
+                        repo.create(dict(seed), creator="human")
                 _SINGLETONS["roles"] = repo
     return _SINGLETONS["roles"]
 
