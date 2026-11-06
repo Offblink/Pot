@@ -56,7 +56,7 @@ _BUILTIN_SEEDS: tuple[dict, ...] = (
         "tools": ["shell", "files", "search"],
         "wip": 5,
         "maxInstances": 3,
-        "canClaim": ["全部", "coding"],
+        "canClaim": ["coding"],
         "canCreateCard": False,
     },
     {

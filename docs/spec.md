@@ -94,7 +94,7 @@ Fungi 砍成**纯单机**本机 Agent（保留桌面控制、MCP、技能与日�
   "model": "…",              // 空 = 跟随全局
   "wip": 2,                  // 每个实例同时最多持有的卡（裁决 33）
   "maxInstances": 3,         // 同角色实例上限；自动增殖到此为止（裁决 33，仅人可改）
-  "canClaim": ["coding"],    // 可认领的卡标签；空 = 全部
+  "canClaim": ["coding"],    // 可认领的卡标签（子集比较）；空 = 不限（任何标签都行）
   "canCreateCard": false,
   "template": null,          // 派生自哪个模板（Planner 建的角色必填）
   "createdBy": "human"       // 或 "planner"（见下）
@@ -339,7 +339,7 @@ M5+，届时单独裁决（自备 Python 还是要塞进安装包）。
 | 38 | 卡完成后唤醒 Planner（2026-11-06 追加，用户「那你加吧」） | 卡进 **done** → `deliver_card_block` 之后，对同一 `notify_route` 目标再发一条**内部 note**（裁决 35 口径：渲染层不显示，模型默认 `<<SILENT>>`）：复盘报告、有后续就 `pot_board_create` 续拆/`pot_board_reassign` 调整。与裁决 34 的 blocked 唤醒同范式；人卡/种子卡照旧零打扰（裁决 31 闸不变） |
 | 39 | 并行派工（2026-11-06 追加，用户「多 agent → 多像素」） | `dispatch_pending` 改**先收集、再并发**：一个周期先为每张可认领卡分配**不同实例**（本周期已分配的实例计满 → 触发裁决 33 增殖），再用有界线程池（`_MAX_PARALLEL=4`，限的是同时在飞的模型 API 调用）并行跑 `run_turn`；`_CYCLE` 持到全部回合汇合——嵌套唤醒拿不到锁、非阻塞直接返回。并发前提实测成立：`jobs` 的当前会话是 thread-local（不是全局态）、看板每操作独立连接 + BEGIN IMMEDIATE + WAL、告警与会话锁各自有锁 |
 | 40 | 卡片退役通道（2026-11-06 追加，E；用户选「planner 可 retire 自己 source 的卡」） | 新工具 **`pot_board_retire`**（`Board.retire`）：**planner_only 闸 + reason 必填 + ifVersion**，把**自己 source 的活卡**（todo/doing/blocked）软删（`deleted=1`、`retired: <reason>` 进评论）——死卡不再永远堵 todo。**done 不可退役**（历史归场景，人经详情重开/删除）；无 source 的人卡只归人（WebUI 详情删除不变）；别会话的卡报 `not_your_card`；重退 `no_such_card`。Planner 提示词加一条自有卡退役说明 |
-| 41 | 内置分工（2026-11-06 追加，用户「设计几个合理的分工内置到项目里」） | **五个内置角色随 `roles_repo()` 播种**（seed-if-missing，与 Planner 同语义：人可改可删、删除下次启动补回）：`executor` 执行者（`canClaim:["全部","coding"]`，shell/files/search，通用+编码）、`writer` 写手（`docs`，files/search）、`tester` 测试员（`test`，shell/files，只报不修）、`researcher` 研究员（`research`，web/search/files，只查不改）、`reviewer` 审稿人（`review`，files/search，只审不改）。全部 `wip:5`（2026-11-06 用户定：1太少、30 太多）、`canCreateCard:false`。**分工判据 = 卡片标签 ⊆ 角色 canClaim**；无标签卡按角色文件名序归执行者（executor 排最前） |
+| 41 | 内置分工（2026-11-06 追加，用户「设计几个合理的分工内置到项目里」） | **五个内置角色随 `roles_repo()` 播种**（seed-if-missing，与 Planner 同语义：人可改可删、删除下次启动补回）：`executor` 执行者（`canClaim:["coding"]`，shell/files/search，通用+编码；无标签卡是任何列表的子集、按文件名序归它）、`writer` 写手（`docs`，files/search）、`tester` 测试员（`test`，shell/files，只报不修）、`researcher` 研究员（`research`，web/search/files，只查不改）、`reviewer` 审稿人（`review`，files/search，只审不改）。全部 `wip:5`（2026-11-06 用户定：1太少、30 太多）、`canCreateCard:false`。**分工判据 = 卡片标签 ⊆ 角色 canClaim**；无标签卡按角色文件名序归执行者（executor 排最前） |
 
 ## 10. 风险
 

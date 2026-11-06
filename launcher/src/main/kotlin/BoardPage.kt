@@ -282,11 +282,15 @@ private fun priorityLabel(p: String): String =
 private fun canClaimText(role: JSONObject): String =
     when {
         role.isNull("canClaim") -> ""
-        role.optBoolean("canClaim", false) && role.opt("canClaim") is Boolean ->
-            if (role.optBoolean("canClaim")) Strings.t("全部", "all") else Strings.t("禁止", "none")
+        role.opt("canClaim") is Boolean ->
+            if (role.optBoolean("canClaim")) Strings.t("不限", "any") else Strings.t("禁止", "none")
         else ->
-            role.optJSONArray("canClaim")?.joinStrings()?.ifEmpty { Strings.t("全部", "all") } ?: ""
+            role.optJSONArray("canClaim")?.joinStrings()?.ifEmpty { Strings.t("不限", "any") } ?: ""
     }
+// 2026-11-06: 「全部」曾同时是空数组的 UI 文案和一个普通标签字面量（数据层
+// board.py 只做子集比较、无特判），编辑器往返还会把文案写回数据（空数组 →
+// 显示「全部」→ 保存成 ["全部"]）。文案改「不限」；canClaimValue 把显示词
+// 映回真值，不让任何文案再落成标签。
 
 @Composable
 private fun RoleEditor(
@@ -391,8 +395,8 @@ private fun RoleEditor(
                     supportingText = {
                         Text(
                             Strings.t(
-                                "标签逗号分隔；空=全部；false=禁止认领",
-                                "Comma-separated labels; blank = all; false = none",
+                                "标签逗号分隔；空=不限；false=禁止认领",
+                                "Comma-separated labels; blank = any; false = none",
                             ),
                             fontSize = 10.sp,
                         )
@@ -467,7 +471,12 @@ private fun canClaimValue(text: String): Any {
     val t = text.trim()
     return when {
         t.isEmpty() -> org.json.JSONArray()
-        t.equals("false", true) -> false
+        t.equals("false", true) || t.equals("禁止", true) || t.equals("none", true) -> false
+        // Display tokens map back to values — never become literal labels.
+        // 「全部」/all: the old UI wrote it for an empty array, so bare legacy
+        // occurrences are contamination, not a label anyone chose.
+        t.equals("不限", true) || t.equals("any", true) ||
+            t.equals("全部", true) || t.equals("all", true) -> org.json.JSONArray()
         else -> JSONArrayOf(t)
     }
 }
