@@ -28,12 +28,74 @@ const pane = FC.initPane({
 });
 const S = pane.of('session'), F = pane.of('friend');
 function isNearBottom(el) { return el.scrollHeight - el.scrollTop - el.clientHeight < 60; }
+let _restoreToken = 0; // restoreScroll is single-instance: newer call wins
+/* 贴底钉（pin）：跳底/开会话/重载贴底后进入钉住态——每帧检查、落后就补，
+   content-visibility 的渲染长高何时到都无所谓（帧时序赌不得，实测晚到 3 帧
+   就能把「安静帧」判定骗过去）。任何非贴边的滚动位移 = 读者自己动了 → 解钉
+   （滚轮/ PgUp/拖滚动条都走 scroll 位移），此后永不回拽 —— 不贴底不跟随。 */
+let _pinBottom = false;
+function pinBottom() {
+  _pinBottom = true;
+  msgs.scrollTop = msgs.scrollHeight;
+  msgs.scrollTop = msgs.scrollHeight;
+}
+(function pinLoop() {
+  if (_pinBottom) {
+    const gap = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight;
+    if (gap > 1) {
+      msgs.scrollTop = msgs.scrollHeight;
+      msgs.scrollTop = msgs.scrollHeight;
+    }
+  }
+  requestAnimationFrame(pinLoop);
+})();
+msgs.addEventListener('scroll', () => {
+  if (!_pinBottom) return;
+  // We only ever leave it at the edge; a gap means the reader moved it.
+  if (msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight > 2) _pinBottom = false;
+});
+/* content-visibility makes scrollHeight grow as the viewport reaches
+   not-yet-rendered rows: a single set lands short — converge over animation
+   frames instead (each set clamps further down, which renders the rows it
+   reaches). Bottom jumps don't come here: they use the pin above. Abort when
+   the reader grabs the wheel or the open session changes. */
+function restoreScroll(top) {
+  const sid = currentSessionId;
+  const token = ++_restoreToken; // one steerer at a time: a newer call cancels the older loop
+  let tries = 0;
+  let done = false;
+  const stop = () => {
+    if (done) return;
+    done = true;
+    msgs.removeEventListener('wheel', grab);
+    msgs.removeEventListener('touchstart', grab);
+  };
+  const grab = () => stop(); // the reader took over: stop steering
+  msgs.addEventListener('wheel', grab, { passive: true });
+  msgs.addEventListener('touchstart', grab, { passive: true });
+  const step = () => {
+    if (done || currentSessionId !== sid || token !== _restoreToken) { stop(); return; }
+    // Synchronous rounds first: each set clamps as far as the current layout
+    // allows, and the next scrollHeight read forces the rows it reached to
+    // render — so one frame usually walks the whole distance (rAF alone is
+    // fps-bound and crawls in headless).
+    for (let i = 0; i < 16; i++) {
+      if (Math.abs(msgs.scrollTop - top) < 1) { stop(); return; }
+      const before = msgs.scrollTop;
+      msgs.scrollTop = top; // clamps when short — that IS the progress
+      if (msgs.scrollTop === before) break; // no growth this round: wait a frame
+    }
+    if (++tries >= 20) { stop(); return; }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
 function updateScrollBtn() {
   const b = document.getElementById('scroll-bottom');
   if (!b) return;
   if (isNearBottom(msgs)) b.classList.remove('visible'); else b.classList.add('visible');
 }
-document.getElementById('scroll-bottom').addEventListener('click', () => { msgs.scrollTop = msgs.scrollHeight; updateScrollBtn(); });
+document.getElementById('scroll-bottom').addEventListener('click', () => { pinBottom(); updateScrollBtn(); });
 msgs.addEventListener('scroll', updateScrollBtn);
 
 /* #status carries motion.js's wave bars as an element child beside its text,
@@ -86,8 +148,10 @@ async function reloadSessionFromServer() {
     updateCtxSize();
     registerArchived(s.subagents);
     const stick = isNearBottom(msgs); // measure before the repaint replaces the DOM
+    const keepTop = msgs.scrollTop;
     renderMessages(s);
-    if (stick && S.stick()) updateScrollBtn();
+    if (stick) { pinBottom(); updateScrollBtn(); }
+    else restoreScroll(keepTop); // the pane emptied mid-repaint: the browser clamped to 0
     loadSessions();
   } catch (e) {}
 }
@@ -151,7 +215,7 @@ async function switchSession(id) {
     S.clear();
     registerArchived(s.subagents);
     renderMessages(s);
-    S.stick(); updateScrollBtn(); // a freshly opened session starts at the latest message
+    pinBottom(); updateScrollBtn(); // a freshly opened session starts at the latest message
     renderSessionList(); loadSessions();
     reattachIfRunning(s.id);
     Alerts.tick(); // 用户正在看这个会话：立刻告诉服务端（红点该掉、铃该停）
@@ -958,6 +1022,8 @@ function renderTurnLive() {
   if (!turn || turn.sessionId !== currentSessionId || !pane.is('session')) return;
   const saved = saveAskCardState();
   const stick = isNearBottom(msgs); // measure before the repaint replaces the DOM
+  const keepTop = msgs.scrollTop; // …and keep the reader's place: emptying the pane
+  // clamps scrollTop, so a rebuild must put it back when not sticking
   S.el().querySelectorAll('.live-node').forEach(n => n.remove());
   if (turn.userText && !turn.userRendered) {
     const u = document.createElement('div');
@@ -996,7 +1062,8 @@ function renderTurnLive() {
       S.append(d);
     }
   });
-  S.stick();
+  if (stick) S.stick();
+  else msgs.scrollTop = keepTop;
   // Motion: animate only nodes that appeared since the previous streaming
   // re-render — every text chunk rebuilds .live-node, re-animating all of
   // them would flicker (docs/webui-ux.md contract).

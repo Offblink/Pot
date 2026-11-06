@@ -54,7 +54,7 @@ _BUILTIN_SEEDS: tuple[dict, ...] = (
             " you did."
         ),
         "tools": ["shell", "files", "search"],
-        "wip": 1,
+        "wip": 5,
         "maxInstances": 3,
         "canClaim": ["全部", "coding"],
         "canCreateCard": False,
@@ -68,7 +68,7 @@ _BUILTIN_SEEDS: tuple[dict, ...] = (
             " never invent their contents."
         ),
         "tools": ["files", "search"],
-        "wip": 1,
+        "wip": 5,
         "maxInstances": 3,
         "canClaim": ["docs"],
         "canCreateCard": False,
@@ -82,7 +82,7 @@ _BUILTIN_SEEDS: tuple[dict, ...] = (
             " text. Never fix code — report only."
         ),
         "tools": ["shell", "files"],
-        "wip": 1,
+        "wip": 5,
         "maxInstances": 3,
         "canClaim": ["test"],
         "canCreateCard": False,
@@ -96,7 +96,7 @@ _BUILTIN_SEEDS: tuple[dict, ...] = (
             " changes."
         ),
         "tools": ["web", "search", "files"],
-        "wip": 1,
+        "wip": 5,
         "maxInstances": 3,
         "canClaim": ["research"],
         "canCreateCard": False,
@@ -110,7 +110,7 @@ _BUILTIN_SEEDS: tuple[dict, ...] = (
             " findings. No edits."
         ),
         "tools": ["files", "search"],
-        "wip": 1,
+        "wip": 5,
         "maxInstances": 3,
         "canClaim": ["review"],
         "canCreateCard": False,

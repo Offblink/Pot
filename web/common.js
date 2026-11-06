@@ -15,7 +15,7 @@
   /* Build marker: bump per web/ change so any WebUI instance can self-identify
      (console + window.__POT_WEB_VER) — stale cache vs new server is otherwise
      indistinguishable from the outside. */
-  window.__POT_WEB_VER = 'web-scene-feed-lines';
+  window.__POT_WEB_VER = 'web-scroll-policy';
   try { console.info('[pot-web]', window.__POT_WEB_VER); } catch (e) {}
   /* ---------- http ---------- */
   /* One fetch wrapper. Mobile inits a token prefix + 403 hook; desktop inits
@@ -615,10 +615,14 @@
           painted();
           return node;
         },
-        /* Keep the bottom pinned after a repaint that replaced the pane. */
+        /* Keep the bottom pinned after a repaint that replaced the pane.
+           Twice: content-visibility makes scrollHeight grow when the first
+           set lands the viewport on not-yet-rendered rows — the second read
+           sees the grown height and the set reaches the true edge. */
         stick() {
           if (!active()) return false;
           const el = ctx.msgs();
+          el.scrollTop = el.scrollHeight;
           el.scrollTop = el.scrollHeight;
           return true;
         },

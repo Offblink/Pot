@@ -261,7 +261,7 @@ def test_builtin_roles_seed_edit_sticks_and_delete_reseeds(tmp_path, monkeypatch
     ids = {r.id for r in repo.list()}
     assert {"planner", "executor", "writer", "tester", "researcher", "reviewer"} <= ids
     ex = repo.get("executor")
-    assert ex.canClaim == ["全部", "coding"] and ex.wip == 1 and ex.canCreateCard is False
+    assert ex.canClaim == ["全部", "coding"] and ex.wip == 5 and ex.canCreateCard is False
     assert repo.get("writer").canClaim == ["docs"]
     assert repo.get("tester").canClaim == ["test"]
     assert repo.get("researcher").tools == ["web", "search", "files"]
