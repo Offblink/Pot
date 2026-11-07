@@ -1,7 +1,8 @@
-"""Role memory + the bounded role-wake context (裁决 43).
+"""Role memory + the bounded role-wake context (裁决 43/44).
 
 Covers both halves of the incident: summaries are index-only (no size
-budget), and a role wake re-feeds ZERO transcript rows — while storage
+budget), and a role wake re-feeds ZERO transcript rows — not even the last
+wake's closing words (裁决 44: only the summaries stay) — while storage
 keeps the full history.
 """
 
@@ -69,45 +70,8 @@ def test_index_is_newest_first_titles_only(memdir):
     assert "the very old lesson" not in section  # TITLE only, never full text
 
 
-def test_index_and_recap_absent_when_nothing_there():
+def test_index_absent_when_nothing_there():
     assert mem.index_section("no-such-role") == ""
-    assert mem.recap_section([{"role": "user", "content": "hi"}]) == ""
-
-
-# ---- recap: the previous wake's closing words ----
-
-
-def test_recap_takes_last_final_text_and_caps():
-    rows = [
-        {"role": "system", "content": ""},
-        {"role": "user", "content": "brief 1"},
-        {"role": "assistant", "content": "first closing"},
-        {"role": "user", "content": "brief 2"},
-        {"role": "assistant", "content": "second closing"},
-    ]
-    assert "second closing" in mem.recap_section(rows)
-    assert "first closing" not in mem.recap_section(rows)
-
-    long = "A" * mem.RECAP_CHARS + "B" * 500
-    capped = mem.recap_section([{"role": "assistant", "content": long}])
-    assert "A" * mem.RECAP_CHARS in capped  # full head kept
-    assert "B" * 500 not in capped  # tail dropped
-    assert capped.endswith("…[truncated]")
-
-
-def test_recap_skips_tool_loops_aborts_errors_and_silence():
-    rows = [
-        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
-        {"role": "tool", "content": "output", "tool_call_id": "1"},
-        {"role": "assistant", "content": "(Aborted)"},
-        {"role": "assistant", "content": "(LLM error: boom)"},
-        {"role": "assistant", "content": "<<SILENT>>"},
-        {"role": "assistant", "content": "the real closing"},
-    ]
-    assert "real closing" in mem.recap_section(rows)
-
-    only_junk = [{"role": "assistant", "content": "<<SILENT>>"}]
-    assert mem.recap_section(only_junk) == ""
 
 
 # ---- the wake itself: bounded model view, full storage ----
@@ -166,8 +130,8 @@ def test_role_wake_sees_brief_plus_memory_not_the_transcript(room):
     assert "pot_memory_write" in sys_text  # the ROLE_SECTION rule
     assert "memory index" in sys_text and "采集配方" in sys_text  # the TITLE line
     assert "Edge headless" not in sys_text  # titles only — full text via pot_memory_read
-    assert "Where you left off" in sys_text
-    assert "FINAL: shipped the parser rewrite" in sys_text  # previous closing
+    assert "Where you left off" not in sys_text  # 裁决 44: the recap block is gone
+    assert "FINAL: shipped the parser rewrite" not in sys_text  # no last closing either
     assert "brief 0" not in sys_text and "answer 0" not in sys_text  # no replay
 
     # storage keeps EVERYTHING plus this turn's rows

@@ -6,14 +6,15 @@ every wake replayed all of it, until DeepSeek's 1M window answered HTTP 400.
 Storage keeps the full transcript (scrollback + forensics); only the list
 sent to the model is rebuilt per wake:
 
-    system prompt + index_section() + recap() + the current brief
+    system prompt + index_section() + the current brief
 
 - index: ONE line per summary file (first line of each, newest first).
   No size budget: the full text is fetched on demand with `pot_memory_read`
   (裁决 43 — the user's "list only, never the full text" call).
-- recap: the previous wake's final assistant text, hard-capped — where it
-  left off. In-progress state lives on the CARD (checklist/comments), not
-  in the transcript, which is why no history rows are re-fed at all.
+- NOTHING else from past sessions is injected — no history rows, no recap
+  of the previous wake's closing words (裁决 44, 2026-11-07: "只保留总结
+  就够了"). In-progress state lives on the CARD (checklist/comments), not
+  in the transcript.
 
 Summaries are OPTIONAL: the role writes one after a card completes if the
 task produced durable knowledge (`pot_memory_write`). Files:
@@ -37,13 +38,10 @@ if TYPE_CHECKING:
 
 MEM_DIR = PROJECT_ROOT / "data" / "mem"
 MAX_SUMMARY_BYTES = 32_000  # one write cannot smuggle a transcript into memory
-RECAP_CHARS = 4_000  # hard cap on the "where you left off" block
 _INDEX_LINE_CHARS = 80
 _ROLE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _NAME_RE = re.compile(r"^\d{8}-\d{6}-[0-9a-f]{4}\.md$")
 _GUARD = threading.Lock()
-
-_USELESS_RECAPS = ("(Aborted)", "(LLM error", "<<SILENT>>")
 
 MEMORY_WRITE_SCHEMA = {
     "type": "function",
@@ -161,36 +159,6 @@ def index_section(role_id: str) -> str:
     return (
         "\n\n## Your memory index (summaries you saved after past tasks)"
         "\nFull text: pot_memory_read(file). Newest first.\n" + "\n".join(lines)
-    )
-
-
-def _last_final_text(rows: list[dict]) -> str:
-    """The most recent usable closing text: a plain assistant message (no
-    tool_calls), not an abort/error/silence marker."""
-    for row in reversed(rows):
-        if row.get("role") != "assistant":
-            continue
-        if row.get("tool_calls"):
-            continue
-        text = str(row.get("content") or "").strip()
-        if not text or any(text.startswith(marker) for marker in _USELESS_RECAPS):
-            continue
-        if len(text) > RECAP_CHARS:
-            return text[:RECAP_CHARS] + "\n…[truncated]"
-        return text
-    return ""
-
-
-def recap_section(rows: list[dict]) -> str:
-    """System-prompt block: the previous wake's closing words, capped.
-    Rows are the FULL stored transcript (the new brief among them); only an
-    assistant final text matches, so the brief itself never leaks here."""
-    text = _last_final_text(rows)
-    if not text:
-        return ""
-    return (
-        "\n\n## Where you left off (your last wake's closing words — the"
-        " transcript itself is not re-fed)\n" + text
     )
 
 

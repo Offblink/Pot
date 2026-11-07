@@ -1144,7 +1144,7 @@ def _execute_turn(
             # tokens → HTTP 400). `messages` stays the FULL storage view
             # (scrollback/forensics unchanged); `run` is what the model gets:
             # system row + this wake's input only — the system row gains the
-            # memory index and last wake's closing words below.
+            # memory index below (裁决 44: nothing else from past sessions).
             role_id = str((stored or {}).get("role") or "") if loaded_from_store else ""
             run = messages
             if role_id and user_msg is not None:
@@ -1189,12 +1189,13 @@ def _execute_turn(
                 # trilayer prompt forever.
                 run[0] = {"role": "system", "content": fresh_prompt}
             if run is not messages and run[0].get("role") == "system":
-                # 裁决 43: memory index (summary TITLES only — full text via
-                # pot_memory_read) + where it left off. Rebuilt every wake
+                # 裁决 43/44: memory index (summary TITLES only — full text via
+                # pot_memory_read) and NOTHING else from past sessions: no
+                # recap of the last wake, no history rows. Rebuilt every wake
                 # from data/mem/, never persisted into the transcript.
                 # Spliced BEFORE the skills suffix: agent.run re-manages that
                 # suffix and would cut anything appended after it.
-                block = mem.index_section(role_id) + mem.recap_section(messages)
+                block = mem.index_section(role_id)
                 if block:
                     run[0]["content"] = skills.insert_before_section(run[0]["content"], block)
             run_len = len(run)
