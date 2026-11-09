@@ -15,6 +15,7 @@ Security: comm clones (and their spawns) get a readonly tool — autonomous
 inter-host agents must not be able to persist prompt changes on this host.
 """
 
+import os
 import re
 import threading
 from dataclasses import dataclass
@@ -30,6 +31,29 @@ SKILLS_DIR = PROJECT_ROOT / "data" / "skills"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 MAX_BODY = 32768
 MAX_DESC = 200
+COMPANION_LIST_LIMIT = 100
+# Never surfaced as companion files: vendored/build trees. video-shotcraft
+# ships a whole web project — listing its 31,885 node_modules files was a
+# 2.8MB tool result (context overflow → HTTP 400, 2026-11-09) and took 13s
+# to walk. Pruned from the LISTING only; action=read plus path still opens
+# anything inside the skill directory.
+_SKIP_DIRS = frozenset(
+    {
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        "target",
+        ".gradle",
+        ".idea",
+        ".cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
 _GUARD = threading.Lock()
 WRITING_SKILLS = """\
 ---
@@ -219,15 +243,22 @@ def section() -> str:
 
 
 def _companion_files(skill_dir: Path) -> list[Path]:
-    """Every file in a directory skill except SKILL.md itself."""
+    """Every file in a directory skill except SKILL.md itself.
+
+    Vendored/build trees are pruned (see _SKIP_DIRS): a skill shipping a web
+    project has 33k+ files under node_modules — listing them all was one2.8MB
+    tool result. os.walk prunes whole subtrees; rglob would still walk them."""
     root = skill_dir.resolve()
     if not root.is_dir():
         return []
     out: list[Path] = []
-    for p in sorted(root.rglob("*")):
-        if p.is_file() and p != root / "SKILL.md":
-            out.append(p)
-    return out
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            if p != root / "SKILL.md":
+                out.append(p)
+    return sorted(out)
 
 
 def _read_companion(name: str, rel: str) -> str:
@@ -271,11 +302,17 @@ def skill_tool(args: dict, readonly: bool = False) -> str:
         out = f"# {skill.name}: {skill.description}\n\n{skill.body}"
         files = _companion_files(SKILLS_DIR / name)
         if files:
+            shown = files[:COMPANION_LIST_LIMIT]
             listed = "\n".join(
                 f"- {q.relative_to((SKILLS_DIR / name).resolve()).as_posix()}"
                 f" ({q.stat().st_size} bytes)"
-                for q in files
+                for q in shown
             )
+            if len(files) > len(shown):
+                listed += (
+                    f"\n… and {len(files) - len(shown)} more files not listed "
+                    "(read any of them with action=read plus path)"
+                )
             out += f"\n\nCompanion files — read with action=read plus path:\n{listed}"
         return out
     if action == "save":

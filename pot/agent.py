@@ -462,13 +462,19 @@ class Agent:
 def _tool_content(output: str):
     """Image/video reads arrive as an ImageRead (a str subclass carrying pixel
     data URLs): upgrade the tool message to OpenAI multimodal content so a
-    vision model actually sees the pictures. Everything else stays a string."""
+    vision model actually sees the pictures. Everything else stays a string.
+
+    Either way the text is capped at TRUNCATE_TOOL_RESULT before it enters
+    `messages`: the UI sink always truncated, but the model got the raw output —
+    one 2.8MB skills listing plus one 540KB grep row pushed a conversation to
+    1.07M tokens → HTTP 400 on every later turn (2026-11-09). This is the
+    "~16000 chars" the system prompt promises."""
     if isinstance(output, ImageRead):
         return [
-            {"type": "text", "text": str(output)},
+            {"type": "text", "text": _truncate(str(output))},
             *[{"type": "image_url", "image_url": {"url": u}} for u in output.data_urls],
         ]
-    return output
+    return _truncate(output)
 
 
 def _truncate(text: str, limit: int = TRUNCATE_TOOL_RESULT) -> str:

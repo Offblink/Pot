@@ -6,6 +6,7 @@ from pathlib import Path
 GLOB_LIMIT = 50
 GREP_FILE_LIMIT = 200
 GREP_MATCH_LIMIT = 40
+GREP_LINE_LIMIT = 500  # a matched line can be a whole JSON/minified line
 TEXT_EXTENSIONS = {
     ".ps1",
     ".cmd",
@@ -94,8 +95,10 @@ def tool_grep(pattern: str, path: str | None = None) -> str:
         try:
             with file.open(encoding="utf-8-sig", errors="replace") as handle:
                 for lineno, line in enumerate(handle, start=1):
-                    if regex.search(line):
-                        rows.append(f"{file.name}:{lineno}:{line.strip()}")
+                    text = line.strip()
+                    m = regex.search(text)
+                    if m:
+                        rows.append(f"{file.name}:{lineno}:{_clip(text, m.start())}")
                         if len(rows) >= GREP_MATCH_LIMIT:
                             return "\n".join(rows)
         except OSError:
@@ -103,3 +106,18 @@ def tool_grep(pattern: str, path: str | None = None) -> str:
     if not rows:
         return f"(no matches for '{pattern}')"
     return "\n".join(rows)
+
+
+def _clip(line: str, at: int) -> str:
+    """A GREP_LINE_LIMIT window centered on the match. A session-JSON line ran
+    to 2.8MB — 40 such rows were one 540KB tool result (context overflow →
+    HTTP 400, 2026-11-09); file:lineno in the row lets the agent read the
+    real line when it needs more."""
+    if len(line) <= GREP_LINE_LIMIT:
+        return line
+    half = GREP_LINE_LIMIT // 2
+    start = max(0, min(at - half, len(line) - GREP_LINE_LIMIT))
+    end = start + GREP_LINE_LIMIT
+    prefix = "..." if start else ""
+    suffix = "..." if end < len(line) else ""
+    return f"{prefix}{line[start:end]}{suffix} [line is {len(line)} chars]"

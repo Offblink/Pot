@@ -178,6 +178,24 @@ def test_grep_invalid_regex():
     assert tool_grep("([bad").startswith("ERROR: Invalid regex")
 
 
+def test_grep_clips_a_huge_matched_line_around_the_match(tmp_path, monkeypatch):
+    """A session-JSON line runs to megabytes; the row must carry a bounded
+    window centered on the match (2.8MB line → 540KB tool result → HTTP 400,
+    2026-11-09). file:lineno stays so the agent can read the real line."""
+    from pot.tools.search import GREP_LINE_LIMIT
+
+    monkeypatch.chdir(tmp_path)
+    huge = "A" * 5000 + "needle_token" + "B" * 5000
+    (tmp_path / "one.json").write_text(huge + "\n", encoding="utf-8")
+
+    out = tool_grep("needle_token")
+    row = out.splitlines()[0]
+    assert row.startswith("one.json:1:")
+    assert "needle_token" in row  # window centered on the match, not head-only
+    assert len(row) < GREP_LINE_LIMIT + 80  # bounded regardless of line size
+    assert "10012 chars" in row  # the agent still learns the true size
+
+
 def test_dispatch_missing_required():
     assert dispatch("read", {}) == "ERROR: Missing required argument: path"
 

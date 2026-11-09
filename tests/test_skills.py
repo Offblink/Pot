@@ -148,6 +148,34 @@ def test_directory_skill_with_companion_script():
     ).startswith("ERROR")  # skill without a directory
 
 
+def test_companion_listing_prunes_vendor_dirs_and_caps():
+    """The listing must never flood the context: video-shotcraft shipped a
+    whole web project (31,885 node_modules files → one 2.8MB tool result →
+    HTTP 400 context overflow, 2026-11-09)."""
+    assert skills.save("fat-skill", "Use when fat.", "1. Steps.").startswith("OK")
+    d = skills.SKILLS_DIR / "fat-skill"
+    (d / "scripts").mkdir()
+    (d / "scripts" / "a.py").write_text("x = 1", encoding="utf-8")
+    vendored = d / "node_modules" / "pkg"
+    vendored.mkdir(parents=True)
+    (vendored / "index.js").write_text("junk", encoding="utf-8")
+    (d / ".git").mkdir()
+    (d / ".git" / "config").write_text("[core]", encoding="utf-8")
+    for i in range(skills.COMPANION_LIST_LIMIT + 10):
+        (d / "scripts" / f"f{i:03d}.py").write_text("x", encoding="utf-8")
+
+    out = skills.skill_tool({"action": "read", "name": "fat-skill"})
+    listed = [ln for ln in out.splitlines() if ln.startswith("- ")]
+    assert len(listed) == skills.COMPANION_LIST_LIMIT  # capped, not 31k+
+    assert "more files not listed" in out
+    assert "node_modules" not in out and ".git/" not in out
+
+    # pruning is listing-only: path reads still reach any file inside
+    assert "junk" in skills.skill_tool(
+        {"action": "read", "name": "fat-skill", "path": "node_modules/pkg/index.js"}
+    )
+
+
 def test_legacy_flat_skills_still_read_and_shadowed():
     skills.load_all()  # seed the dir before placing a legacy flat file
     (skills.SKILLS_DIR / "old-style.md").write_text(

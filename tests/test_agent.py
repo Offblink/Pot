@@ -65,6 +65,42 @@ def test_tool_round_then_answer(tmp_path):
     assert messages[4]["content"] == "the file says data"
 
 
+def test_huge_tool_output_is_truncated_before_it_reaches_the_model():
+    """The UI sink always truncated at 16000, but `messages` (what the model
+    reads, and what the session replays on every later turn) got the raw
+    output — one 2.8MB skills listing + one 540KB grep row blew a chat to
+    1.07M tokens → HTTP 400 forever (2026-11-09)."""
+    from pot.agent import TRUNCATE_TOOL_RESULT
+
+    def flood(_args):
+        return "Z" * 500_000
+
+    agent, fake, events = make_agent(
+        [
+            LLMResult(tool_calls=[tool_call("flood", "{}", "f1")]),
+            LLMResult(content="done"),
+        ],
+        extra_tools={
+            "flood": BoundTool(
+                schema={"type": "function", "function": {"name": "flood", "parameters": {}}},
+                fn=flood,
+            )
+        },
+    )
+    messages = [{"role": "user", "content": "go"}]
+    agent.run(messages)
+
+    tool_msg = messages[3]
+    assert tool_msg["role"] == "tool"
+    assert len(tool_msg["content"]) < TRUNCATE_TOOL_RESULT + 100
+    assert "[truncated 484000 chars]" in tool_msg["content"]
+    # the model's own request carries the truncated row, not the raw output
+    resent = fake.calls[1][0]
+    assert all(len(str(m.get("content") or "")) < TRUNCATE_TOOL_RESULT + 100 for m in resent)
+    # and the UI still got its copy
+    assert "[truncated" in events[1][1]["content"]
+
+
 def test_tool_streaming_deltas_reach_sink():
     results = [
         LLMResult(content="let me check", tool_calls=[tool_call("bash", '{"command": "echo hi"}')]),
